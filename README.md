@@ -253,6 +253,59 @@ character and would rather skip the BLE round-trip,
 `tools/flash_character.py characters/bufo` stages it into `data/` and runs
 `pio run -t uploadfs` directly over USB.
 
+## Desktop simulator
+
+The firmware can be run as a native macOS executable for development
+without flashing. It targets the **ESP32-S3-Touch-AMOLED-2.16** profile
+and renders the same 184×224 logical canvas through the same letterbox
++ rotation pipeline the real CO5300 panel uses, so it's pixel-identical
+to the device.
+
+Requires SDL2 (`brew install sdl2`) and Python 3 (tk is in the stock
+install).
+
+```bash
+cd sim && make           # build sim/build/buddy-sim
+sim/build/buddy-sim      # run the firmware in an SDL window
+
+# in another terminal, drive it like the real desktop app:
+python3 tools/sim_driver.py
+```
+
+`sim_driver.py` is a Tk panel that speaks the BLE wire protocol over
+TCP (`127.0.0.1:31415`) instead of GATT. It mirrors what the Hardware
+Buddy app pushes to the real device:
+
+- sliders for `total` / `running` / `waiting` and token counters
+- multi-line transcript box for `entries[]`
+- approval prompt sender (tool + hint) — log shows the device's
+  `{cmd:"permission", decision:"once"|"deny"}` reply
+- time sync, celebrate, status, owner/pet name commands
+- character upload: pick a folder of `manifest.json + *.gif` and the
+  sim receives it via the same `char_begin`/`file`/`chunk`/`file_end`/
+  `char_end` flow as the real device
+
+Keys inside the sim window:
+
+| key | mapped to |
+| --- | --- |
+| Space / Enter | KEY1 (BtnA — primary / approve) |
+| `B` / → | KEY2 (BtnB — secondary / deny) |
+| `M` | synthesized BtnA long-press (BOOT key) |
+| `S` | IMU shake spike (drives dizzy state) |
+| `F` | toggle face-down (drives nap) |
+| `U` | toggle USB-present (changes screen-off timeout) |
+| Esc | quit |
+
+For repeatable demos, `sim_scenario.py` plays a `.jsonl` script:
+
+```bash
+python3 tools/sim_scenario.py tools/demos/busy_session.jsonl
+```
+
+The simulator's LittleFS lives in `~/.cache/buddy-sim/fs/` and NVS in
+`~/.cache/buddy-sim/nvs.json` — delete those to factory-reset.
+
 ## Project layout
 
 ```
@@ -274,7 +327,8 @@ lib/
   Arduino_DriveBus/  — vendored FT3168 touch driver (1.8)
   Adafruit_XCA9554/  — vendored TCA9554 expander driver (1.8)
 characters/          — example GIF character packs
-tools/               — generators and converters
+tools/               — generators, converters, sim driver/scenario
+sim/                 — desktop simulator (SDL2; see Desktop simulator)
 docs/superpowers/    — design specs + implementation plans
 ```
 

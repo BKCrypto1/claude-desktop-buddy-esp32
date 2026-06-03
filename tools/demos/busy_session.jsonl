@@ -1,0 +1,20 @@
+{"echo": "1) start clean — no work, idle pet"}
+{"send": {"total": 0, "running": 0, "waiting": 0, "tokens": 0, "tokens_today": 0, "msg": "", "entries": []}}
+{"sleep": 1}
+{"echo": "2) a session kicks off — busy pet, transcript line"}
+{"send": {"total": 1, "running": 1, "waiting": 0, "tokens": 4200, "tokens_today": 4200, "msg": "Reading codebase…", "entries": ["Reading codebase…"]}}
+{"sleep": 4}
+{"echo": "3) more activity"}
+{"send": {"total": 2, "running": 1, "waiting": 1, "tokens": 9100, "tokens_today": 9100, "msg": "Editing src/main.cpp", "entries": ["Reading codebase…", "Editing src/main.cpp"]}}
+{"sleep": 4}
+{"echo": "4) approval prompt — buddy goes attention, border pulses"}
+{"send": {"prompt": {"id": "demo_p1", "tool": "Bash", "hint": "rm -rf build/"}}}
+{"sleep": 3}
+{"echo": "5) clear prompt — back to busy"}
+{"send": {"prompt": null}}
+{"sleep": 2}
+{"echo": "6) work finishes — celebrate"}
+{"send": {"cmd": "celebrate"}}
+{"sleep": 4}
+{"echo": "7) settle to idle"}
+{"send": {"total": 0, "running": 0, "waiting": 0, "tokens": 12500, "tokens_today": 12500, "msg": "", "entries": []}}
