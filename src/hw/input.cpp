@@ -6,7 +6,7 @@
 
 #if BOARD_TOUCH_CST92XX
   #include <Wire.h>
-  #include "TouchDrvCSTXXX.hpp"
+  #include "TouchDrv.hpp"
 #else
   #include <Arduino_DriveBus_Library.h>
 #endif
@@ -143,9 +143,11 @@ static void scanTouch() {
   }
 
 #if BOARD_TOUCH_CST92XX
-  int16_t x[2] = {0}, y[2] = {0};
-  uint8_t n = s_cst.getPoint(x, y, s_cst.getSupportTouchPoint());
+  const TouchPoints& tpts = s_cst.getTouchPoints();
+  uint8_t n = tpts.getPointCount();
   if (n > 0) {
+    int16_t px = tpts.getPoint(0).x;
+    int16_t py = tpts.getPoint(0).y;
     s_tp.justPressed  = !s_tp.down;
     s_tp.justReleased = false;
     // Mirror of hwDisplayPush's letterbox scale: reverse (physical → canvas).
@@ -154,8 +156,8 @@ static void scanTouch() {
     #if BOARD_DISPLAY_LETTERBOX
       constexpr int OFF_X  = (LCD_W_PHYS - BOARD_DISPLAY_DEST_W) / 2;
       constexpr int OFF_Y  = (LCD_H_PHYS - BOARD_DISPLAY_DEST_H) / 2;
-      int dx = x[0] - OFF_X;
-      int dy = y[0] - OFF_Y;
+      int dx = px - OFF_X;
+      int dy = py - OFF_Y;
       int tx = (dx * BOARD_HW_W) / BOARD_DISPLAY_DEST_W;
       int ty = (dy * BOARD_HW_H) / BOARD_DISPLAY_DEST_H;
       if (tx < 0) tx = 0; else if (tx >= BOARD_HW_W) tx = BOARD_HW_W - 1;
@@ -165,8 +167,8 @@ static void scanTouch() {
     #else
       // Non-letterbox: physical → canvas via OFFSET subtract + scale downscale.
       // OFFSET is 0 on 1.8 (full-fill), 148/128 on 2.16 (centred 184×224 in 480×480).
-      int dx = x[0] - BOARD_DISPLAY_OFFSET_X;
-      int dy = y[0] - BOARD_DISPLAY_OFFSET_Y;
+      int dx = px - BOARD_DISPLAY_OFFSET_X;
+      int dy = py - BOARD_DISPLAY_OFFSET_Y;
       int tx = dx / BOARD_DISPLAY_SCALE;
       int ty = dy / BOARD_DISPLAY_SCALE;
       if (tx < 0) tx = 0; else if (tx >= BOARD_HW_W) tx = BOARD_HW_W - 1;

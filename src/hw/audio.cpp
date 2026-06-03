@@ -13,7 +13,10 @@
 // can land in PSRAM ("user context not in internal RAM" GDMA error).
 // The legacy driver allocates DMA structs directly via heap_caps with
 // MALLOC_CAP_DMA which forces internal RAM.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wcpp"
 #include <driver/i2s.h>
+#pragma GCC diagnostic pop
 
 extern "C" {
 #include "es8311.h"
@@ -34,8 +37,8 @@ static bool i2sInit() {
   cfg.channel_format = I2S_CHANNEL_FMT_ONLY_LEFT;
   cfg.communication_format = I2S_COMM_FORMAT_STAND_I2S;
   cfg.intr_alloc_flags = ESP_INTR_FLAG_LEVEL1;
-  cfg.dma_buf_count = 4;
-  cfg.dma_buf_len = 256;
+  cfg.dma_desc_num = 4;
+  cfg.dma_frame_num = 256;
   cfg.use_apll = false;
   cfg.tx_desc_auto_clear = true;
   cfg.fixed_mclk = AUDIO_SR * 256;

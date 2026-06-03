@@ -98,7 +98,7 @@ void bleInit(const char* deviceName) {
     NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR | NIMBLE_PROPERTY::WRITE_ENC);
   rxChar->setCallbacks(new RxCallbacks());
 
-  svc->start();
+  // svc->start() removed: NimBLE 2.x auto-starts services with the server.
 
   NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
   // BLE legacy advertisement is limited to 31 bytes of payload. A 128-bit
