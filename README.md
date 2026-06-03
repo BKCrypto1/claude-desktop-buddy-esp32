@@ -258,8 +258,10 @@ character and would rather skip the BLE round-trip,
 The firmware can be run as a native macOS executable for development
 without flashing. It targets the **ESP32-S3-Touch-AMOLED-2.16** profile
 and renders the same 184×224 logical canvas through the same letterbox
-+ rotation pipeline the real CO5300 panel uses, so it's pixel-identical
-to the device.
+pipeline the real CO5300 panel uses. The sim shows the framebuffer
+right-side-up for readable on-screen development; the firmware-side
+MADCTL=0xA0 panel rotation that the real device needs is unchanged, so
+flashed hardware still displays correctly.
 
 Requires SDL2 (`brew install sdl2`) and Python 3 (tk is in the stock
 install).
@@ -276,11 +278,12 @@ python3 tools/sim_driver.py
 TCP (`127.0.0.1:31415`) instead of GATT. It mirrors what the Hardware
 Buddy app pushes to the real device:
 
-- sliders for `total` / `running` / `waiting` and token counters
+- spinboxes for `total` / `running` / `waiting` and token counters
 - multi-line transcript box for `entries[]`
 - approval prompt sender (tool + hint) — log shows the device's
   `{cmd:"permission", decision:"once"|"deny"}` reply
 - time sync, celebrate, status, owner/pet name commands
+- species dropdown (18 ASCII species + "GIF" for the uploaded character)
 - character upload: pick a folder of `manifest.json + *.gif` and the
   sim receives it via the same `char_begin`/`file`/`chunk`/`file_end`/
   `char_end` flow as the real device

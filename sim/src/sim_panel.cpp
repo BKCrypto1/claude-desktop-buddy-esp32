@@ -1,11 +1,12 @@
-// SDL2 viewport + letterbox + 90° CCW rotation.
+// SDL2 viewport + letterbox.
 //
 // The firmware writes RGB565 into a 184×224 canvas. On the real CO5300
-// panel, hwDisplayPush() bilinear-scales that to 368×448 (exact 2×),
-// centres it at (56, 16) inside the 480×480 frame buffer, then the
-// panel's MADCTL=0xA0 (MV+MY) rotates the whole frame 90° CCW for
-// display. We mirror that pipeline pixel-for-pixel so the sim window
-// shows what the real device will show.
+// panel, hwDisplayPush() bilinear-scales that to 368×448 (exact 2×) and
+// centres it at (56, 16) inside the 480×480 frame buffer; the panel's
+// MADCTL=0xA0 then rotates for the device's physical mount. The sim
+// window has no physical rotation to compensate for, so we render the
+// pre-rotation framebuffer right-side-up — content reads naturally on
+// screen while the firmware code path is unchanged.
 //
 // The bilinear-scale loop here is ported verbatim from
 // src/hw/display.cpp:151-184 — see comments there for the RGB565 trick.
@@ -61,21 +62,13 @@ void simPanelShutdown() {
   SDL_Quit();
 }
 
-// Reverse the letterbox + 90° CW rotation so a click at SDL window
-// coord (x_w, y_w) maps to a canvas (cx, cy) in 0..HW_W-1 / 0..HW_H-1.
-//
-// Forward path (canvas → window):
-//   letterbox: (cx, cy) → (OFF_X + cx*DEST_W/HW_W, OFF_Y + cy*DEST_H/HW_H) = (rx, ry)
-//   rotate 90° CW: (rx, ry) → (LCD_H_PHYS-1 - ry, rx) = (xw, yw)
-// Reverse:
-//   undo rotation: rx = yw;  ry = LCD_H_PHYS-1 - xw
-//   undo letterbox: cx = (rx - OFF_X) * HW_W / DEST_W
-//                   cy = (ry - OFF_Y) * HW_H / DEST_H
+// Reverse the letterbox so a click at SDL window coord (xw, yw) maps to
+// canvas (cx, cy) in 0..HW_W-1 / 0..HW_H-1. No rotation applied — the
+// sim renders the framebuffer un-rotated, so window coords ARE physical
+// frame coords.
 static void mouseToCanvas(int xw, int yw, SimMouse& m) {
-  int rx = yw;
-  int ry = LCD_H_PHYS - 1 - xw;
-  int cx = (rx - OFF_X) * HW_W / DEST_W;
-  int cy = (ry - OFF_Y) * HW_H / DEST_H;
+  int cx = (xw - OFF_X) * HW_W / DEST_W;
+  int cy = (yw - OFF_Y) * HW_H / DEST_H;
   m.cx = (int16_t)cx;
   m.cy = (int16_t)cy;
   m.valid = (cx >= 0 && cx < HW_W && cy >= 0 && cy < HW_H);
@@ -133,9 +126,9 @@ const SimKeys& simPanelKeys() { return s_keys; }
 void simPanelPush(const uint16_t* src, uint8_t brightness, bool border_alert) {
   if (!s_renderer || !s_tex) return;
 
-  // Lock the texture and write the unrotated, letterboxed 480×480 frame.
-  // We rotate visually via SDL_RenderCopyEx below, so the framebuffer
-  // we hand SDL is the same shape as the firmware's s_frameBuf.
+  // Lock the texture and write the letterboxed 480×480 frame. The sim
+  // window matches this orientation directly — content displays
+  // right-side-up.
   uint16_t* pixels = nullptr;
   int pitch = 0;
   if (SDL_LockTexture(s_tex, nullptr, (void**)&pixels, &pitch) != 0) return;
@@ -196,9 +189,7 @@ void simPanelPush(const uint16_t* src, uint8_t brightness, bool border_alert) {
   SDL_SetRenderDrawColor(s_renderer, 0, 0, 0, 255);
   SDL_RenderClear(s_renderer);
 
-  // Rotate 90° clockwise visually. SDL_RenderCopyEx rotates clockwise
-  // by `angle` degrees, so pass +90.
   SDL_SetTextureAlphaMod(s_tex, brightness);
-  SDL_RenderCopyEx(s_renderer, s_tex, nullptr, nullptr, 90.0, nullptr, SDL_FLIP_NONE);
+  SDL_RenderCopy(s_renderer, s_tex, nullptr, nullptr);
   SDL_RenderPresent(s_renderer);
 }

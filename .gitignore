@@ -5,3 +5,4 @@ data/
 .superpowers/
 docs/superpowers/
 sim/build/
+tools/__pycache__/
