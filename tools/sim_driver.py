@@ -306,7 +306,9 @@ class App(tk.Tk):
         spx = ttk.LabelFrame(self, text="Strip import  (itch.io sprite pack → convert → upload)")
         spx.pack(fill="x", **pad)
         spx.columnconfigure(1, weight=1)
-        spx.columnconfigure(4, weight=1)
+        spx.columnconfigure(5, weight=1)
+        spx.columnconfigure(0, minsize=65)
+        spx.columnconfigure(4, minsize=65)
 
         # Row 0: directory + name + bg
         ttk.Label(spx, text="Directory").grid(row=0, column=0, sticky="e", **pad)
