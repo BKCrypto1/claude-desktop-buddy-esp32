@@ -136,6 +136,7 @@ class App(tk.Tk):
         self._inq        = queue.Queue()
         self._ack_waiters = {}
         self._ack_lock   = threading.Lock()
+        self._sim_upload_lock = threading.Lock()   # only one upload to sim at a time
         self._upload_thread = None
         self._build_ui()
         self.after(50, self._drain)
@@ -645,6 +646,10 @@ class App(tk.Tk):
 
     def _upload_to_sim(self, folder, name, set_status, on_done):
         """Shared upload-to-sim worker. Calls set_status(txt, pct) and on_done() when complete."""
+        if not self._sim_upload_lock.acquire(blocking=False):
+            set_status("upload already in progress — wait for it to finish")
+            on_done()
+            return
         try:
             files = sorted(
                 p for p in glob.glob(os.path.join(folder, "*"))
@@ -688,6 +693,7 @@ class App(tk.Tk):
         except Exception as exc:
             set_status(f"error: {exc}")
         finally:
+            self._sim_upload_lock.release()
             on_done()
 
     # ─── My Characters list ───────────────────────────────────────────────────
