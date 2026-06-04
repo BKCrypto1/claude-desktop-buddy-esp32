@@ -114,14 +114,17 @@ def make_gif(frame_paths, delay_ms, out_path, pixel_art=False):
 
     args = ["magick", "-delay", str(delay_centisec), "-loop", "0"]
     args += frame_paths
-    args += ["-dither", "None", "-remap", tmp_palette, "-layers", "Optimize", out_path]
+    # No -layers Optimize: firmware expects full-frame GIFs. Delta/sub-rect
+    # frames mark unchanged pixels transparent; the renderer replaces transparent
+    # with bg color instead of keeping the previous frame → corruption.
+    args += ["-dither", "None", "-remap", tmp_palette, out_path]
     subprocess.run(args, check=True, capture_output=True)
     os.unlink(tmp_palette)
 
-    # Optimise frame structure only — do NOT reduce colours
+    # --lossy shrinks files without creating delta frames (no --optimize flag).
     if shutil.which("gifsicle"):
         subprocess.run(
-            ["gifsicle", "--batch", "--optimize=3", out_path],
+            ["gifsicle", "--batch", "--lossy=80", out_path],
             capture_output=True,
         )
 

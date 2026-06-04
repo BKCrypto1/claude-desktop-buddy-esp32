@@ -356,7 +356,7 @@ class App(tk.Tk):
     # ─── outgoing helpers ───
     def _send(self, obj):
         line = self.bridge.send(obj)
-        self._log("tx", line)
+        self._inq.put(("log", ("tx", line)))
 
     def _send_live(self):
         entries = [s for s in self.entries.get("1.0", "end").splitlines() if s.strip()]
@@ -553,8 +553,11 @@ class App(tk.Tk):
             )
             total = sum(os.path.getsize(p) for p in files)
             self._send({"cmd": "char_begin", "name": name, "total": total})
-            if not (self._wait_ack("char_begin", 10) or {}).get("ok"):
-                self._set_pdx("char_begin failed"); return
+            a = self._wait_ack("char_begin", 10)
+            if a is None:
+                self._set_pdx("char_begin timed out — is sim running?"); return
+            if not a.get("ok"):
+                self._set_pdx(f"char_begin rejected: {a.get('error', a)}"); return
 
             sent = 0
             for path in files:
