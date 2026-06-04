@@ -62,13 +62,38 @@ def detect_frame_w(paths, frame_h):
     return g
 
 
-def extract_frames(sheet, frame_w, frame_h, bg_hex, tmp_dir, label, pixel_art=False):
+def scan_content_size(sheet, frame_w, frame_h, bg_hex, tmp_dir):
+    """
+    Extract the first frame of a strip, flatten, and trim bg border.
+    Returns (w, h) of the actual sprite content without padding.
+    Used to determine a consistent output canvas across all animations.
+    """
+    tmp = os.path.join(tmp_dir, "_scan.png")
+    subprocess.run(
+        ["magick", sheet,
+         "-crop", f"{frame_w}x{frame_h}+0+0", "+repage",
+         "-background", f"#{bg_hex}", "-flatten",
+         "-fuzz", "1%", "-trim", "+repage",
+         tmp],
+        check=True, capture_output=True,
+    )
+    return sheet_dims(tmp)
+
+
+def extract_frames(sheet, frame_w, frame_h, bg_hex, tmp_dir, label,
+                   pixel_art=False, out_w=96, out_h=96):
+    """
+    Extract all frames from a horizontal strip, trim bg padding, resize to
+    out_w x out_h, and normalize to a consistent canvas.
+
+    out_w / out_h are computed globally (from scan_content_size across all
+    animations) so every state renders at the same pixel scale.
+    """
     strip_w, _ = sheet_dims(sheet)
     n_frames = strip_w // frame_w
+    resize_flag = f"{out_w}x{out_h}"
 
-    # Pass 1: crop → flatten → trim bg border → resize.
-    # Trimming removes empty padding so small sprites in large frames get scaled
-    # up to fill 96px rather than staying tiny in a sea of black.
+    # Pass 1: crop → flatten → trim bg border → resize to global canvas.
     raw_paths = []
     for i in range(n_frames):
         x = i * frame_w
@@ -78,9 +103,9 @@ def extract_frames(sheet, frame_w, frame_h, bg_hex, tmp_dir, label, pixel_art=Fa
                "-background", f"#{bg_hex}", "-flatten",
                "-fuzz", "1%", "-trim", "+repage"]
         if pixel_art:
-            cmd += ["-filter", "point", "-resize", "96x96"]
+            cmd += ["-filter", "point", "-resize", resize_flag]
         else:
-            cmd += ["-resize", "96x96"]
+            cmd += ["-resize", resize_flag]
         if not pixel_art:
             cmd += ["-channel", "R", "-posterize", "32",
                     "-channel", "G", "-posterize", "64",
@@ -90,13 +115,8 @@ def extract_frames(sheet, frame_w, frame_h, bg_hex, tmp_dir, label, pixel_art=Fa
         subprocess.run(cmd, check=True, capture_output=True)
         raw_paths.append(raw)
 
-    # Pass 2: normalize all frames to the same canvas (union bounding box,
-    # centred) so the assembled GIF has consistent full-frame dimensions.
-    max_w = max_h = 0
-    for p in raw_paths:
-        w, h = sheet_dims(p)
-        max_w, max_h = max(max_w, w), max(max_h, h)
-
+    # Pass 2: centre-extend every frame to exactly out_w x out_h so the GIF
+    # has consistent full-frame dimensions (required by the firmware renderer).
     paths = []
     for i, raw in enumerate(raw_paths):
         out = os.path.join(tmp_dir, f"{label}_{i:03d}.png")
@@ -104,7 +124,7 @@ def extract_frames(sheet, frame_w, frame_h, bg_hex, tmp_dir, label, pixel_art=Fa
             ["magick", raw,
              "-gravity", "Center",
              "-background", f"#{bg_hex}",
-             "-extent", f"{max_w}x{max_h}",
+             "-extent", resize_flag,
              out],
             check=True, capture_output=True,
         )
@@ -178,6 +198,25 @@ def main():
     mode = "pixel-art (nearest-neighbour)" if pixel_art else "illustrated (Lanczos + RGB565 snap)"
     print(f"  frame: {frame_w}x{frame_h}  mode: {mode}")
 
+    # Global content-size scan: trim the first frame from each unique source
+    # file and find the largest natural sprite dimensions across all animations.
+    # This gives a single consistent output canvas so every state renders at
+    # the same pixel scale — idle won't look bigger than celebrate, etc.
+    unique_sources = list(dict.fromkeys(
+        state_files.get(s, fallback) for s in STATES
+    ))
+    max_cw = max_ch = 0
+    with tempfile.TemporaryDirectory() as scan_tmp:
+        for src in unique_sources:
+            cw, ch = scan_content_size(src, frame_w, frame_h, args.bg, scan_tmp)
+            max_cw, max_ch = max(max_cw, cw), max(max_ch, ch)
+
+    # Fit the largest content into 96×96, preserving aspect ratio.
+    scale = min(96 / max_cw, 96 / max_ch) if max_cw and max_ch else 1.0
+    out_w = max(1, round(max_cw * scale))
+    out_h = max(1, round(max_ch * scale))
+    print(f"  content: {max_cw}x{max_ch} → output canvas: {out_w}x{out_h}")
+
     out_dir = args.out or os.path.join("characters", args.name)
     os.makedirs(out_dir, exist_ok=True)
 
@@ -186,7 +225,8 @@ def main():
             src = state_files.get(s, fallback)
             delay_ms = STATE_DELAYS[s]
             print(f"  {s:12s} ← {os.path.basename(src)}")
-            frames = extract_frames(src, frame_w, frame_h, args.bg, tmp, s, pixel_art)
+            frames = extract_frames(src, frame_w, frame_h, args.bg, tmp, s,
+                                    pixel_art, out_w=out_w, out_h=out_h)
             gif_path = os.path.join(out_dir, f"{s}.gif")
             make_gif(frames, delay_ms, gif_path, pixel_art)
             size_kb = os.path.getsize(gif_path) / 1024
