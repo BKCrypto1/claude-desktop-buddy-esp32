@@ -197,15 +197,15 @@ Any key press or screen tap wakes the panel.
 
 ## Per-state animations
 
-| State       | Trigger                     | Feel                                      |
-| ----------- | --------------------------- | ----------------------------------------- |
-| `sleep`     | bridge not connected        | eyes closed, slow breathing               |
-| `idle`      | connected, nothing urgent   | blinking, looking around                  |
-| `busy`      | sessions actively running   | sweating, working                         |
-| `attention` | approval pending            | alert, **red top-bar pulses**             |
-| `celebrate` | level up (every 50K tokens); Celebrate preset in Simulator tab | confetti, bouncing |
-| `dizzy`     | you shook the device        | spiral eyes, wobbling                     |
-| `heart`     | approved in under 5s        | floating hearts                           |
+| State       | Trigger                                              | Feel                          |
+| ----------- | ---------------------------------------------------- | ----------------------------- |
+| `sleep`     | bridge not connected; clock face ambient             | eyes closed, slow breathing   |
+| `idle`      | connected, nothing urgent                            | blinking, looking around      |
+| `busy`      | 3+ sessions actively running                         | sweating, working             |
+| `attention` | approval pending                                     | alert, **red top-bar pulses** |
+| `celebrate` | level up (every 50K tokens); slow approval (≥ 5 s)  | confetti, bouncing            |
+| `dizzy`     | shake device; denial                                 | spiral eyes, wobbling         |
+| `heart`     | fast approval (< 5 s); tap buddy on home screen      | floating hearts               |
 
 Nineteen ASCII species, each with all seven animations. **Settings →
 ascii pet** cycles them; choice persists in NVS.
@@ -355,9 +355,12 @@ Drives the desktop sim over TCP (`127.0.0.1:31415`) instead of BLE GATT,
 mirroring what the Hardware Buddy app pushes to real hardware:
 
 - Spinboxes for `total` / `running` / `waiting` and token counters
+- **Quick-set buttons** for all 7 buddy states (Sleep / Idle / Busy / Attention
+  top row; Celebrate / Dizzy / Heart bottom row) — one click sets counters and
+  fires the matching animation
 - Transcript box for `entries[]`
 - Approval prompt sender (tool + hint) — log shows the device's reply
-- Time sync, celebrate, status, owner/pet name commands
+- Time sync, status, owner/pet name commands
 - Species dropdown (19 ASCII species + GIF mode)
 - Character upload: pick a folder and stream it to the sim via the
   `char_begin` / `file` / `chunk` / `file_end` / `char_end` protocol
