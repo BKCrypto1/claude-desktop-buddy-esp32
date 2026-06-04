@@ -2,6 +2,7 @@
 #include <Arduino.h>
 #include <LittleFS.h>
 #include "ble_bridge.h"
+#include "buddy.h"
 #include "hw/power.h"
 #include <mbedtls/base64.h>
 #include <ArduinoJson.h>
@@ -135,6 +136,20 @@ inline bool xferCommand(JsonDocument& doc) {
     );
     Serial.write(b, len);
     bleWrite((const uint8_t*)b, len);
+    return true;
+  }
+
+  if (strcmp(cmd, "oneshot") == 0) {
+    extern void triggerOneShot(PersonaState, uint32_t);
+    const char* s = doc["state"] | "";
+    PersonaState ps = P_IDLE;
+    bool ok = true;
+    if      (strcmp(s, "sleep") == 0) ps = P_SLEEP;
+    else if (strcmp(s, "dizzy") == 0) ps = P_DIZZY;
+    else if (strcmp(s, "heart") == 0) ps = P_HEART;
+    else ok = false;
+    if (ok) triggerOneShot(ps, 3000);
+    _xAck("oneshot", ok);
     return true;
   }
 

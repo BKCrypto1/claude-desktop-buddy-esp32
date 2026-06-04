@@ -219,17 +219,26 @@ class App(tk.Tk):
                             ).grid(row=0, column=col+1, sticky="w")
                 col += 2
 
-        # Quick state presets
+        # Quick state presets — two rows of buttons, one per buddy state
         presets = ttk.Frame(live)
         presets.grid(row=1, column=0, columnspan=2, sticky="w", **pad)
-        ttk.Label(presets, text="Quick set:", foreground="#888").pack(side="left", padx=(4, 8))
-        for lbl, fn in [
-            ("Idle",       self._preset_idle),
-            ("Busy",       self._preset_busy),
-            ("Attention",  self._preset_attention),
-            ("Celebrate",  self._preset_celebrate),
-        ]:
-            ttk.Button(presets, text=lbl, command=fn, width=10).pack(side="left", padx=2)
+        ttk.Label(presets, text="Quick set:", foreground="#888").grid(
+            row=0, column=0, padx=(4, 8), rowspan=2, sticky="w")
+        for col, (lbl, fn) in enumerate([
+            ("Sleep",     self._preset_sleep),
+            ("Idle",      self._preset_idle),
+            ("Busy",      self._preset_busy),
+            ("Attention", self._preset_attention),
+        ]):
+            ttk.Button(presets, text=lbl, command=fn, width=9).grid(
+                row=0, column=col + 1, padx=2, pady=1)
+        for col, (lbl, fn) in enumerate([
+            ("Celebrate", self._preset_celebrate),
+            ("Dizzy",     self._preset_dizzy),
+            ("Heart",     self._preset_heart),
+        ]):
+            ttk.Button(presets, text=lbl, command=fn, width=9).grid(
+                row=1, column=col + 1, padx=2, pady=1)
 
         # Message + entries
         ttk.Label(live, text="msg").grid(row=2, column=0, sticky="e", **pad)
@@ -589,6 +598,18 @@ class App(tk.Tk):
         self._cancel_celebrate()
         self.total.set(1); self.running.set(0); self.waiting.set(1)
         self._send_live()
+
+    def _preset_sleep(self):
+        self._cancel_celebrate()
+        self._send({"cmd": "oneshot", "state": "sleep"})
+
+    def _preset_dizzy(self):
+        self._cancel_celebrate()
+        self._send({"cmd": "oneshot", "state": "dizzy"})
+
+    def _preset_heart(self):
+        self._cancel_celebrate()
+        self._send({"cmd": "oneshot", "state": "heart"})
 
     def _preset_celebrate(self):
         # Celebrate is triggered by the "completed" flag in the live payload,

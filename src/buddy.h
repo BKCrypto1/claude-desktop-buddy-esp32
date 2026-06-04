@@ -1,6 +1,11 @@
 #pragma once
 #include <stdint.h>
 
+// 0..6: sleep, idle, busy, attention, celebrate, dizzy, heart.
+// Order must match the stateNames[] array in main.cpp and the GIF state
+// filenames in character.cpp.
+enum PersonaState { P_SLEEP, P_IDLE, P_BUSY, P_ATTENTION, P_CELEBRATE, P_DIZZY, P_HEART };
+
 // Multi-species ASCII buddy renderer. Each species lives in its own
 // src/buddies/<name>.cpp file and exposes 7 state functions matching
 // the PersonaState enum order: sleep, idle, busy, attention, celebrate,
