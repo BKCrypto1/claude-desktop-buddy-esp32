@@ -383,15 +383,12 @@ void characterTick() {
 
   int delayMs = 0;
   if (!gif.playFrame(false, &delayMs)) {
-    // End of animation. Single-gif states freeze on the last frame instead
-    // of reopening — the LittleFS open + GIF header decode is a multi-ms
-    // blocking burst, and during sleep state it was looping every ~4s,
-    // possibly starving the BT controller. The sprite already holds the
-    // last frame; just stop ticking. Multi-gif states (idle rotation)
-    // still advance after a brief pause.
+    // End of animation. For single-gif states, reset (cheap seek to byte 0 —
+    // no file reopen, no header parse) to loop continuously like ASCII anims.
+    // For multi-gif states, loop within the dwell window, then rotate.
     if (stateCount[curState] == 1) {
-      gif.close();
-      gifOpen = false;
+      gif.reset();
+      nextFrameAt = now;
       return;
     }
     // Multi-variant: loop the same GIF until the dwell window elapses, then

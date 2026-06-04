@@ -253,6 +253,43 @@ character and would rather skip the BLE round-trip,
 `tools/flash_character.py characters/bufo` stages it into `data/` and runs
 `pio run -t uploadfs` directly over USB.
 
+### Importing from Petdex
+
+[Petdex](https://petdex.crafter.run) is a catalog of animated sprite characters.
+`tools/petdex_convert.py` slices a Petdex spritesheet (1536×1872, ARGB WebP)
+into the seven Claude Buddy GIF states at 96×104 px.
+
+```bash
+# Download the spritesheet first (the install script drops it in ~/.codex/pets/<name>/)
+curl -sSf https://petdex.crafter.run/install/mallow | sh
+
+# Convert — illustrated/smooth characters (default)
+python3 tools/petdex_convert.py ~/.codex/pets/mallow/spritesheet.webp \
+    --name mallow --bg 000000 --out characters/mallow
+
+# Convert — pixel-art characters (chunky sprites, crisp edges)
+python3 tools/petdex_convert.py ~/.codex/pets/boba/spritesheet.webp \
+    --name boba --bg 000000 --pixel-art --out characters/boba
+```
+
+| flag | when to use |
+| --- | --- |
+| *(none)* | illustrated / smooth characters — Lanczos resize + RGB565-snapped palette |
+| `--pixel-art` | chunky pixel-art sprites — nearest-neighbor resize + exact palette |
+
+The `--pixel-art` flag matters because the firmware's AnimatedGIF decoder
+converts the GIF's RGB888 palette entries to RGB565 internally. Lanczos blurs
+pixel edges slightly before that snap, which produces noisy results; nearest-
+neighbor preserves every pixel boundary and avoids the problem entirely.
+
+Optional arguments: `--body`/`--text` set manifest UI colours; `--bg` sets the
+fill colour used behind transparent pixels (default `000000`).
+
+The sim driver's **Petdex import** field does the download + convert + upload
+in one step — paste a `https://petdex.crafter.run/pets/<name>` URL and click
+**Import**. Already-converted packs in `characters/` are re-uploaded without
+re-converting.
+
 ## Desktop simulator
 
 The firmware can be run as a native macOS executable for development
@@ -263,8 +300,12 @@ right-side-up for readable on-screen development; the firmware-side
 MADCTL=0xA0 panel rotation that the real device needs is unchanged, so
 flashed hardware still displays correctly.
 
-Requires SDL2 (`brew install sdl2`) and Python 3 (tk is in the stock
-install).
+Requires SDL2 and Python 3 with Tkinter:
+
+```bash
+brew install sdl2
+brew install python-tk@3.14   # or whichever Python version you have
+```
 
 ```bash
 cd sim && make           # build sim/build/buddy-sim
@@ -287,6 +328,12 @@ Buddy app pushes to the real device:
 - character upload: pick a folder of `manifest.json + *.gif` and the
   sim receives it via the same `char_begin`/`file`/`chunk`/`file_end`/
   `char_end` flow as the real device
+- **Petdex import**: paste a `https://petdex.crafter.run/pets/<name>` URL
+  (or just the pet name), tick **Pixel art** for chunky pixel-art characters,
+  and click **Import** — the driver downloads the spritesheet, converts all
+  7 GIF states via `tools/petdex_convert.py`, uploads the pack to the sim,
+  and switches to GIF mode automatically. Already-converted packs are cached
+  in `characters/` and skip the download+convert step on re-import.
 
 Keys inside the sim window:
 
@@ -330,7 +377,11 @@ lib/
   Arduino_DriveBus/  — vendored FT3168 touch driver (1.8)
   Adafruit_XCA9554/  — vendored TCA9554 expander driver (1.8)
 characters/          — example GIF character packs
-tools/               — generators, converters, sim driver/scenario
+tools/
+  sim_driver.py      — Tk control panel + Petdex one-click importer
+  sim_scenario.py    — replay .jsonl demo scripts
+  petdex_convert.py  — Petdex spritesheet → 7-state GIF character pack
+  flash_character.py — USB LittleFS staging (skip BLE round-trip)
 sim/                 — desktop simulator (SDL2; see Desktop simulator)
 docs/superpowers/    — design specs + implementation plans
 ```

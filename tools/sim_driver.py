@@ -27,7 +27,10 @@ import glob
 import json
 import os
 import queue
+import re
 import socket
+import subprocess
+import sys
 import threading
 import time
 import tkinter as tk
@@ -56,9 +59,14 @@ class Bridge:
         self._on_state = on_state        # callback(bool connected)
         self._sock = None
         self._stop = threading.Event()
+        self._connected = threading.Event()   # set when socket is live
         self._tx = queue.Queue()
         self._t = threading.Thread(target=self._run, daemon=True)
         self._t.start()
+
+    def wait_connected(self, timeout=10.0):
+        """Block until connected (or timeout). Returns True if connected."""
+        return self._connected.wait(timeout=timeout)
 
     def send(self, obj):
         line = json.dumps(obj, separators=(",", ":")) + "\n"
@@ -78,12 +86,15 @@ class Bridge:
             try:
                 self._sock = socket.create_connection((HOST, PORT), timeout=1.5)
                 self._sock.settimeout(0.1)
+                self._connected.set()
                 self._on_state(True)
                 self._pump()
             except (ConnectionRefusedError, OSError):
+                self._connected.clear()
                 self._on_state(False)
                 time.sleep(0.5)
             finally:
+                self._connected.clear()
                 try:
                     if self._sock:
                         self._sock.close()
@@ -262,6 +273,24 @@ class App(tk.Tk):
         ttk.Label(chf, textvariable=self.char_status, foreground="#888"
                   ).grid(row=1, column=4, sticky="w", **pad)
 
+        # Petdex import
+        pdx = ttk.LabelFrame(self, text="Petdex import  (download → convert → upload)")
+        pdx.pack(fill="x", **pad)
+        pdx.columnconfigure(1, weight=1)
+        ttk.Label(pdx, text="URL or name").grid(row=0, column=0, sticky="e", **pad)
+        self.petdex_url = tk.StringVar(value="https://petdex.crafter.run/pets/mallow")
+        ttk.Entry(pdx, textvariable=self.petdex_url).grid(row=0, column=1, sticky="we", **pad)
+        self.petdex_pixel_art = tk.BooleanVar(value=False)
+        ttk.Checkbutton(pdx, text="Pixel art", variable=self.petdex_pixel_art
+                        ).grid(row=0, column=2, **pad)
+        self.petdex_btn = ttk.Button(pdx, text="Import", command=self._start_petdex_import)
+        self.petdex_btn.grid(row=0, column=3, **pad)
+        self.petdex_progress = ttk.Progressbar(pdx, mode="determinate", maximum=100)
+        self.petdex_progress.grid(row=1, column=0, columnspan=2, sticky="we", **pad)
+        self.petdex_status = tk.StringVar(value="idle")
+        ttk.Label(pdx, textvariable=self.petdex_status, foreground="#888",
+                  width=28).grid(row=1, column=2, sticky="w", **pad)
+
         # Log
         logf = ttk.LabelFrame(self, text="Log")
         logf.pack(fill="both", expand=True, **pad)
@@ -309,10 +338,17 @@ class App(tk.Tk):
                 kind, payload = self._inq.get_nowait()
                 if kind == "rx":
                     self._log("rx", payload)
+                elif kind == "log":
+                    self._log(*payload)
                 elif kind == "state":
                     self.status.set("connected" if payload else "disconnected")
                     self.tk.call(self.children["!frame"].children["!label2"], "configure",
                                  "-foreground", "green" if payload else "red")
+                elif kind == "pdx":
+                    txt, pct = payload
+                    self.petdex_status.set(txt)
+                    if pct is not None:
+                        self.petdex_progress["value"] = pct
         except queue.Empty:
             pass
         self.after(50, self._drain)
@@ -427,6 +463,129 @@ class App(tk.Tk):
                 self._set_status(f"char_end failed: {a}")
         finally:
             self.upload_btn.configure(state="normal")
+
+    # ─── Petdex import ───
+    def _set_pdx(self, txt, pct=None):
+        """Thread-safe status + progress update (routes through _inq)."""
+        self._inq.put(("pdx", (txt, pct)))
+
+    def _qlog(self, kind, line):
+        """Thread-safe log write from background threads."""
+        self._inq.put(("log", (kind, line)))
+
+    def _start_petdex_import(self):
+        url = self.petdex_url.get().strip()
+        if not url:
+            return
+        self.petdex_btn.configure(state="disabled")
+        pixel_art = self.petdex_pixel_art.get()
+        threading.Thread(target=self._petdex_worker, args=(url, pixel_art), daemon=True).start()
+
+    def _petdex_worker(self, url_or_name, pixel_art=False):
+        STATES = ["sleep", "idle", "busy", "attention", "celebrate", "dizzy", "heart"]
+        try:
+            # ── 1. Parse pet name ──────────────────────────────────────────
+            name = re.split(r"[/?#]", url_or_name.rstrip("/"))[-1] or url_or_name
+            repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            out_dir   = os.path.join(repo_root, "characters", name)
+            manifest  = os.path.join(out_dir, "manifest.json")
+
+            # ── 2. Skip download+convert if pack already exists ────────────
+            if os.path.isfile(manifest):
+                self._set_pdx(f"{name} already converted — uploading…", 72)
+                self._qlog("sys", f"[petdex] '{name}' found at {out_dir}, skipping download")
+            else:
+                self._set_pdx(f"Downloading {name}…", 2)
+                self._qlog("sys", f"[petdex] installing '{name}'")
+
+            # ── 3. Download + convert (skipped if pack already exists) ─────
+                install_url = f"https://petdex.crafter.run/install/{name}"
+                r = subprocess.run(
+                    ["sh", "-c", f"curl -sSf '{install_url}' | sh"],
+                    capture_output=True, text=True,
+                )
+                if r.returncode != 0:
+                    self._set_pdx(f"Download failed: {r.stderr.strip()[:50]}")
+                    self._qlog("sys", f"[petdex] error: {r.stderr.strip()}")
+                    return
+
+                sheet = os.path.expanduser(f"~/.codex/pets/{name}/spritesheet.webp")
+                if not os.path.exists(sheet):
+                    self._set_pdx("spritesheet not found after install")
+                    return
+                self._set_pdx("Download done, converting…", 18)
+
+                script = os.path.join(repo_root, "tools", "petdex_convert.py")
+                cmd = [sys.executable, "-u", script, sheet, "--name", name, "--out", out_dir]
+                if pixel_art:
+                    cmd.append("--pixel-art")
+                proc = subprocess.Popen(cmd,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, bufsize=1,
+                )
+                done = 0
+                for line in proc.stdout:
+                    line = line.rstrip()
+                    if not line:
+                        continue
+                    self._qlog("sys", f"[convert] {line}")
+                    for state in STATES:
+                        if f"{state}.gif" in line:
+                            done += 1
+                            pct = 20 + done / len(STATES) * 50
+                            self._set_pdx(f"Converting {state} ({done}/{len(STATES)})…", pct)
+                proc.wait()
+                if proc.returncode != 0:
+                    self._set_pdx("Conversion failed — see log")
+                    return
+
+            # ── 4. Wait for sim connection before upload ───────────────────
+            self._set_pdx("Waiting for sim connection…", 72)
+            if not self.bridge.wait_connected(timeout=15):
+                self._set_pdx("Sim not connected — is buddy-sim running?")
+                return
+            self._set_pdx("Uploading…", 73)
+
+            # ── 5. Upload to sim (inline — reuses bridge & ack machinery) ──
+            files = sorted(
+                p for p in glob.glob(os.path.join(out_dir, "*"))
+                if os.path.isfile(p) and not os.path.basename(p).startswith(".")
+            )
+            total = sum(os.path.getsize(p) for p in files)
+            self._send({"cmd": "char_begin", "name": name, "total": total})
+            if not (self._wait_ack("char_begin", 10) or {}).get("ok"):
+                self._set_pdx("char_begin failed"); return
+
+            sent = 0
+            for path in files:
+                fn   = os.path.basename(path)
+                data = open(path, "rb").read()
+                self._send({"cmd": "file", "path": fn, "size": len(data)})
+                if not (self._wait_ack("file", 5) or {}).get("ok"):
+                    self._set_pdx(f"file open failed: {fn}"); return
+                for i in range(0, len(data), CHUNK_BYTES):
+                    chunk = data[i:i + CHUNK_BYTES]
+                    self._send({"cmd": "chunk", "d": base64.b64encode(chunk).decode()})
+                    if not (self._wait_ack("chunk", 5) or {}).get("ok"):
+                        self._set_pdx(f"chunk failed: {fn}+{i}"); return
+                    sent += len(chunk)
+                    self._set_pdx(f"Uploading {fn}…", 72 + sent / total * 26)
+                self._send({"cmd": "file_end"})
+                if not (self._wait_ack("file_end", 10) or {}).get("ok"):
+                    self._set_pdx(f"file_end failed: {fn}"); return
+
+            self._send({"cmd": "char_end"})
+            ok = (self._wait_ack("char_end", 15) or {}).get("ok")
+            self._set_pdx("Done! Character active." if ok else "char_end failed", 100)
+            # Auto-switch to GIF mode so the new character shows immediately
+            if ok:
+                self._send({"cmd": "species", "idx": 255})
+
+        except Exception as exc:
+            self._set_pdx(f"Error: {exc}")
+            self._qlog("sys", f"[petdex] exception: {exc}")
+        finally:
+            self.petdex_btn.configure(state="normal")
 
     def _send_time(self):
         now = int(time.time())
