@@ -207,17 +207,14 @@ Any key press or screen tap wakes the panel.
 | `dizzy`     | you shook the device        | spiral eyes, wobbling                     |
 | `heart`     | approved in under 5s        | floating hearts                           |
 
-Eighteen ASCII species, each with all seven animations. **Settings →
+Nineteen ASCII species, each with all seven animations. **Settings →
 ascii pet** cycles them; choice persists in NVS.
 
 ## Custom GIF characters
 
-If you want a custom GIF character instead of an ASCII buddy, drag a
-character pack folder onto the drop target in the Hardware Buddy window.
-The app streams it over BLE and the device switches to GIF mode live.
-**Settings → reset → delete char** reverts to ASCII mode.
-
-A character pack is a folder with `manifest.json` and 96 px-wide GIFs:
+A character pack is a folder containing `manifest.json` and one GIF per
+state. GIFs are 96 px wide; up to ~140 px tall keeps the character above
+the HUD. The whole pack must fit under 1.8 MB.
 
 ```json
 {
@@ -244,14 +241,37 @@ A character pack is a folder with `manifest.json` and 96 px-wide GIFs:
 State values can be a single filename or an array. Arrays rotate
 loop-by-loop, useful for an idle activity carousel.
 
-GIFs are 96 px wide; up to ~140 px tall keeps the character above the HUD.
-The whole folder must fit under 1.8 MB; `gifsicle --lossy=80 -O3 --colors 64`
-typically cuts 40–60 %.
+**Settings → reset → delete char** reverts to ASCII mode.
 
-See `characters/bufo/` for a working example. If you're iterating on a
-character and would rather skip the BLE round-trip,
-`tools/flash_character.py characters/bufo` stages it into `data/` and runs
-`pio run -t uploadfs` directly over USB.
+### Installing a character pack
+
+Three ways, in order of convenience:
+
+**1. Buddy Manager (GUI)** — open the **Characters** tab, select a pack
+from the list, and click **Flash USB** or **Upload BLE** (see
+[Desktop simulator](#desktop-simulator)).
+
+**2. BLE (wireless, no GUI needed)**
+
+```bash
+pip install bleak   # once
+
+python3 tools/ble_driver.py --list              # find nearby devices
+python3 tools/ble_driver.py characters/bufo     # upload to first device found
+python3 tools/ble_driver.py characters/bufo --device "Claude-AB12"
+```
+
+First connect triggers BLE pairing — a 6-digit passkey appears on the
+device screen; enter it in the macOS system dialog. Subsequent connects
+auto-bond. The device switches to GIF mode immediately after upload.
+
+**3. USB (fastest for iteration)**
+
+```bash
+python3 tools/flash_character.py characters/bufo
+```
+
+Stages the pack into `data/` and runs `pio run -t uploadfs` over USB.
 
 ### Importing from Petdex
 
@@ -260,7 +280,7 @@ character and would rather skip the BLE round-trip,
 into the seven Claude Buddy GIF states at 96×104 px.
 
 ```bash
-# Download the spritesheet first (the install script drops it in ~/.codex/pets/<name>/)
+# Download the spritesheet (drops it in ~/.codex/pets/<name>/)
 curl -sSf https://petdex.crafter.run/install/mallow | sh
 
 # Convert — illustrated/smooth characters (default)
@@ -277,28 +297,42 @@ python3 tools/petdex_convert.py ~/.codex/pets/boba/spritesheet.webp \
 | *(none)* | illustrated / smooth characters — Lanczos resize + RGB565-snapped palette |
 | `--pixel-art` | chunky pixel-art sprites — nearest-neighbor resize + exact palette |
 
-The `--pixel-art` flag matters because the firmware's AnimatedGIF decoder
-converts the GIF's RGB888 palette entries to RGB565 internally. Lanczos blurs
-pixel edges slightly before that snap, which produces noisy results; nearest-
-neighbor preserves every pixel boundary and avoids the problem entirely.
+The Buddy Manager's **Characters → Petdex import** field does the download +
+convert + upload in one step. Already-converted packs skip the
+download+convert on re-import.
 
-Optional arguments: `--body`/`--text` set manifest UI colours; `--bg` sets the
-fill colour used behind transparent pixels (default `000000`).
+### Importing from itch.io / horizontal-strip packs
 
-The sim driver's **Petdex import** field does the download + convert + upload
-in one step — paste a `https://petdex.crafter.run/pets/<name>` URL and click
-**Import**. Already-converted packs in `characters/` are re-uploaded without
-re-converting.
+Many sprite packs from itch.io use a **horizontal strip** format — one PNG
+per animation, frames laid out left to right in a single row.
+`tools/strip_convert.py` handles these:
 
-## Desktop simulator
+```bash
+python3 tools/strip_convert.py /path/to/sprites/ \
+    --name mushroom --bg 000000 --pixel-art \
+    --idle   Mushroom-Idle.png \
+    --busy   Mushroom-Run.png \
+    --celebrate Mushroom-Attack.png \
+    --attention Mushroom-Hit.png \
+    --sleep  Mushroom-Stun.png \
+    --dizzy  Mushroom-Stun.png \
+    --heart  Mushroom-Idle.png
+```
 
-The firmware can be run as a native macOS executable for development
-without flashing. It targets the **ESP32-S3-Touch-AMOLED-2.16** profile
-and renders the same 184×224 logical canvas through the same letterbox
-pipeline the real CO5300 panel uses. The sim shows the framebuffer
-right-side-up for readable on-screen development; the firmware-side
-MADCTL=0xA0 panel rotation that the real device needs is unchanged, so
-flashed hardware still displays correctly.
+Frame width is auto-detected from the GCD of all specified files' widths.
+Multiple Claude states can share the same source file (e.g. `--sleep` and
+`--dizzy` both pointing at the same stun animation). Unspecified states fall
+back to `--idle`.
+
+The Buddy Manager's **Characters → Strip import** panel provides a directory
+browser and seven dropdowns that auto-populate and keyword-guess the mapping
+when you pick a folder.
+
+## Desktop simulator & Buddy Manager
+
+`tools/sim_driver.py` is a tabbed **Buddy Manager** app that covers the
+full development workflow — simulator control, character management, and
+firmware flashing — in one window.
 
 Requires SDL2 and Python 3 with Tkinter:
 
@@ -311,31 +345,43 @@ brew install python-tk@3.14   # or whichever Python version you have
 cd sim && make           # build sim/build/buddy-sim
 sim/build/buddy-sim      # run the firmware in an SDL window
 
-# in another terminal, drive it like the real desktop app:
+# in another terminal:
 python3 tools/sim_driver.py
 ```
 
-`sim_driver.py` is a Tk panel that speaks the BLE wire protocol over
-TCP (`127.0.0.1:31415`) instead of GATT. It mirrors what the Hardware
-Buddy app pushes to the real device:
+### Simulator tab
 
-- spinboxes for `total` / `running` / `waiting` and token counters
-- multi-line transcript box for `entries[]`
-- approval prompt sender (tool + hint) — log shows the device's
-  `{cmd:"permission", decision:"once"|"deny"}` reply
-- time sync, celebrate, status, owner/pet name commands
-- species dropdown (18 ASCII species + "GIF" for the uploaded character)
-- character upload: pick a folder of `manifest.json + *.gif` and the
-  sim receives it via the same `char_begin`/`file`/`chunk`/`file_end`/
-  `char_end` flow as the real device
-- **Petdex import**: paste a `https://petdex.crafter.run/pets/<name>` URL
-  (or just the pet name), tick **Pixel art** for chunky pixel-art characters,
-  and click **Import** — the driver downloads the spritesheet, converts all
-  7 GIF states via `tools/petdex_convert.py`, uploads the pack to the sim,
-  and switches to GIF mode automatically. Already-converted packs are cached
-  in `characters/` and skip the download+convert step on re-import.
+Drives the desktop sim over TCP (`127.0.0.1:31415`) instead of BLE GATT,
+mirroring what the Hardware Buddy app pushes to real hardware:
 
-Keys inside the sim window:
+- Spinboxes for `total` / `running` / `waiting` and token counters
+- Transcript box for `entries[]`
+- Approval prompt sender (tool + hint) — log shows the device's reply
+- Time sync, celebrate, status, owner/pet name commands
+- Species dropdown (19 ASCII species + GIF mode)
+- Character upload: pick a folder and stream it to the sim via the
+  `char_begin` / `file` / `chunk` / `file_end` / `char_end` protocol
+
+### Characters tab
+
+- **My Characters** — lists every pack in `characters/` with file count
+  and size. Select one and click:
+  - **Upload to sim** — stream over TCP to the running simulator
+  - **Flash USB** — stage into `data/` and run `uploadfs` via PlatformIO
+  - **Upload BLE** — send wirelessly to real hardware via `ble_driver.py`
+- **Petdex import** — paste a URL or pet name, tick Pixel art if needed,
+  click Import. Downloads, converts, and uploads to the sim in one step.
+- **Strip import** — pick a directory of strip PNGs, assign each Claude
+  state to a source file (auto-guessed from filenames), click Import.
+
+### Firmware tab
+
+- Board dropdown populated from `platformio.ini` envs
+- **Flash Firmware** — runs `pio run -e <env> -t upload`
+- **Flash Filesystem** — runs `pio run -e <env> -t uploadfs`
+- All PlatformIO output streams to the shared log panel
+
+### Sim window keys
 
 | key | mapped to |
 | --- | --- |
@@ -362,7 +408,7 @@ The simulator's LittleFS lives in `~/.cache/buddy-sim/fs/` and NVS in
 src/
   main.cpp           — loop, state machine, UI screens (board-agnostic)
   buddy.{cpp,h}      — ASCII species dispatch + render helpers
-  buddies/           — one file per species, seven anim functions each
+  buddies/           — one file per species (19 total), seven anim functions each
   character.{cpp,h}  — GIF decode + render
   ble_bridge.{cpp,h} — Nordic UART service, line-buffered TX/RX
   data.h             — wire protocol, JSON parse, CJK matrixifier
@@ -376,12 +422,15 @@ lib/
   ES8311/            — vendored Espressif codec driver
   Arduino_DriveBus/  — vendored FT3168 touch driver (1.8)
   Adafruit_XCA9554/  — vendored TCA9554 expander driver (1.8)
-characters/          — example GIF character packs
+characters/          — converted GIF character packs (gitignored)
 tools/
-  sim_driver.py      — Tk control panel + Petdex one-click importer
-  sim_scenario.py    — replay .jsonl demo scripts
+  sim_driver.py      — Buddy Manager: tabbed app (Simulator / Characters / Firmware)
+  sim_scenario.py    — replay .jsonl demo scripts against the simulator
   petdex_convert.py  — Petdex spritesheet → 7-state GIF character pack
-  flash_character.py — USB LittleFS staging (skip BLE round-trip)
+  strip_convert.py   — itch.io horizontal-strip PNG → 7-state GIF character pack
+  ble_driver.py      — BLE character upload to real hardware (pip install bleak)
+  flash_character.py — USB LittleFS staging (pio uploadfs, skip BLE round-trip)
+  prep_character.py  — normalise third-party GIF packs for the Hardware Buddy app
 sim/                 — desktop simulator (SDL2; see Desktop simulator)
 docs/superpowers/    — design specs + implementation plans
 ```
