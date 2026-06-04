@@ -182,107 +182,140 @@ class App(tk.Tk):
     # ── Simulator tab ─────────────────────────────────────────────────────────
 
     def _build_simulator_tab(self, parent, pad):
-        # Live Claude state
-        live = ttk.LabelFrame(parent, text="Live Claude state")
+        # ── Claude state ──────────────────────────────────────────────────────
+        live = ttk.LabelFrame(parent, text="Claude state")
         live.pack(fill="x", **pad)
-        self.total = tk.IntVar(value=0)
-        self.running = tk.IntVar(value=0)
-        self.waiting = tk.IntVar(value=0)
-        sess = ttk.Frame(live)
-        sess.grid(row=0, column=0, columnspan=2, sticky="w", **pad)
-        for col, (lbl, var) in enumerate([
-                ("total", self.total), ("running", self.running), ("waiting", self.waiting)]):
-            ttk.Label(sess, text=lbl).grid(row=0, column=col*2,   sticky="e", padx=(8, 2))
-            ttk.Spinbox(sess, from_=0, to=99, textvariable=var, width=4
-                        ).grid(row=0, column=col*2+1, sticky="w")
+        live.columnconfigure(1, weight=1)
 
-        self.tokens = tk.IntVar(value=0)
+        # Sessions + tokens row
+        counters = ttk.Frame(live)
+        counters.grid(row=0, column=0, columnspan=2, sticky="we", **pad)
+        self.total        = tk.IntVar(value=0)
+        self.running      = tk.IntVar(value=0)
+        self.waiting      = tk.IntVar(value=0)
+        self.tokens       = tk.IntVar(value=0)
         self.tokens_today = tk.IntVar(value=0)
-        tok = ttk.Frame(live)
-        tok.grid(row=1, column=0, columnspan=2, sticky="w", **pad)
-        ttk.Label(tok, text="tokens").grid(row=0, column=0, sticky="e", padx=(8, 2))
-        ttk.Spinbox(tok, from_=0, to=10**7, increment=1000,
-                    textvariable=self.tokens, width=10).grid(row=0, column=1, sticky="w")
-        ttk.Label(tok, text="today").grid(row=0, column=2, sticky="e", padx=(16, 2))
-        ttk.Spinbox(tok, from_=0, to=10**7, increment=1000,
-                    textvariable=self.tokens_today, width=10).grid(row=0, column=3, sticky="w")
+        fields = [
+            ("sessions", None), ("total", self.total), ("running", self.running),
+            ("waiting", self.waiting), ("  tokens", None),
+            ("total", self.tokens, 1000, 8), ("today", self.tokens_today, 1000, 8),
+        ]
+        col = 0
+        for item in fields:
+            if item[1] is None:
+                ttk.Label(counters, text=item[0], foreground="#888"
+                          ).grid(row=0, column=col, padx=(10, 4))
+                col += 1
+            else:
+                lbl  = item[0]
+                var  = item[1]
+                inc  = item[2] if len(item) > 2 else 1
+                w    = item[3] if len(item) > 3 else 4
+                ttk.Label(counters, text=lbl).grid(row=0, column=col, sticky="e", padx=(4, 2))
+                ttk.Spinbox(counters, from_=0, to=10**7, increment=inc,
+                            textvariable=var, width=w
+                            ).grid(row=0, column=col+1, sticky="w")
+                col += 2
 
+        # Quick state presets
+        presets = ttk.Frame(live)
+        presets.grid(row=1, column=0, columnspan=2, sticky="w", **pad)
+        ttk.Label(presets, text="Quick set:", foreground="#888").pack(side="left", padx=(4, 8))
+        for lbl, fn in [
+            ("Idle",       self._preset_idle),
+            ("Busy",       self._preset_busy),
+            ("Attention",  self._preset_attention),
+            ("Celebrate",  self._preset_celebrate),
+        ]:
+            ttk.Button(presets, text=lbl, command=fn, width=10).pack(side="left", padx=2)
+
+        # Message + entries
         ttk.Label(live, text="msg").grid(row=2, column=0, sticky="e", **pad)
         self.msg = tk.StringVar()
         ttk.Entry(live, textvariable=self.msg).grid(row=2, column=1, sticky="we", **pad)
 
         ttk.Label(live, text="entries").grid(row=3, column=0, sticky="ne", **pad)
-        self.entries = tk.Text(live, height=3, width=44)
+        self.entries = tk.Text(live, height=2, width=44)
         self.entries.grid(row=3, column=1, sticky="we", **pad)
+
         ttk.Button(live, text="Send live update",
                    command=self._send_live).grid(row=4, column=1, sticky="e", **pad)
-        live.columnconfigure(1, weight=1)
 
-        # Commands
-        ctl = ttk.LabelFrame(parent, text="Commands")
-        ctl.pack(fill="x", **pad)
-        ctl.columnconfigure(3, weight=1)
+        # ── Approval prompt ───────────────────────────────────────────────────
+        apv = ttk.LabelFrame(parent, text="Approval prompt")
+        apv.pack(fill="x", **pad)
+        apv.columnconfigure(3, weight=1)
 
         self.tool = tk.StringVar(value="Bash")
         self.hint = tk.StringVar(value="rm -rf /")
-        ttk.Label(ctl, text="tool").grid(row=0, column=0, sticky="e", **pad)
-        ttk.Entry(ctl, textvariable=self.tool, width=14).grid(row=0, column=1, sticky="w")
-        ttk.Label(ctl, text="hint").grid(row=0, column=2, sticky="e", **pad)
-        ttk.Entry(ctl, textvariable=self.hint).grid(row=0, column=3, sticky="we", **pad)
-        ttk.Button(ctl, text="Send approval prompt",
-                   command=self._send_prompt).grid(row=0, column=4, columnspan=2, sticky="we", **pad)
+        ttk.Label(apv, text="tool").grid(row=0, column=0, sticky="e", **pad)
+        ttk.Entry(apv, textvariable=self.tool, width=14).grid(row=0, column=1, sticky="w", **pad)
+        ttk.Label(apv, text="hint").grid(row=0, column=2, sticky="e", **pad)
+        ttk.Entry(apv, textvariable=self.hint).grid(row=0, column=3, sticky="we", **pad)
+        ttk.Button(apv, text="Send prompt",
+                   command=self._send_prompt).grid(row=0, column=4, **pad)
+        ttk.Button(apv, text="Clear",
+                   command=lambda: self._send({"prompt": None})
+                   ).grid(row=0, column=5, **pad)
 
-        acts = ttk.Frame(ctl)
-        acts.grid(row=1, column=0, columnspan=6, sticky="we", **pad)
-        for i, (lbl, fn) in enumerate([
-                ("Time sync", self._send_time),
-                ("Celebrate", lambda: self._send({"cmd": "celebrate"})),
-                ("Status",    lambda: self._send({"cmd": "status"})),
-                ("Clear prompt", lambda: self._send({"prompt": None}))]):
-            ttk.Button(acts, text=lbl, command=fn).grid(row=0, column=i, padx=4)
+        # ── Device settings ───────────────────────────────────────────────────
+        dev = ttk.LabelFrame(parent, text="Device")
+        dev.pack(fill="x", **pad)
+        dev.columnconfigure(1, weight=1)
+        dev.columnconfigure(4, weight=1)
 
-        ttk.Label(ctl, text="owner").grid(row=2, column=0, sticky="e", **pad)
+        # Owner / pet name
         self.owner = tk.StringVar(value="Bryan")
-        ttk.Entry(ctl, textvariable=self.owner, width=14).grid(row=2, column=1, sticky="w")
-        ttk.Button(ctl, text="Set owner",
+        self.pet   = tk.StringVar(value="Buddy")
+        ttk.Label(dev, text="Owner").grid(row=0, column=0, sticky="e", **pad)
+        ttk.Entry(dev, textvariable=self.owner, width=14).grid(row=0, column=1, sticky="we", **pad)
+        ttk.Button(dev, text="Set",
                    command=lambda: self._send({"cmd": "owner", "name": self.owner.get()})
-                   ).grid(row=2, column=2, sticky="w", **pad)
-        ttk.Label(ctl, text="pet").grid(row=2, column=3, sticky="e", **pad)
-        self.pet = tk.StringVar(value="Buddy")
-        ttk.Entry(ctl, textvariable=self.pet, width=14).grid(row=2, column=4, sticky="w")
-        ttk.Button(ctl, text="Set name",
+                   ).grid(row=0, column=2, **pad)
+        ttk.Label(dev, text="Pet name").grid(row=0, column=3, sticky="e", **pad)
+        ttk.Entry(dev, textvariable=self.pet, width=14).grid(row=0, column=4, sticky="we", **pad)
+        ttk.Button(dev, text="Set",
                    command=lambda: self._send({"cmd": "name", "name": self.pet.get()})
-                   ).grid(row=2, column=5, sticky="w", **pad)
+                   ).grid(row=0, column=5, **pad)
 
-        ttk.Label(ctl, text="species").grid(row=3, column=0, sticky="e", **pad)
+        # Species
         self.species_choice = tk.StringVar(value="GIF (uploaded character)")
-        ttk.Combobox(ctl, textvariable=self.species_choice, state="readonly", width=24,
+        ttk.Label(dev, text="Species").grid(row=1, column=0, sticky="e", **pad)
+        ttk.Combobox(dev, textvariable=self.species_choice, state="readonly", width=28,
                      values=["GIF (uploaded character)"] + [
                          f"{i}: {n}" for i, n in enumerate(SPECIES_NAMES)]
-                     ).grid(row=3, column=1, columnspan=3, sticky="we", **pad)
-        ttk.Button(ctl, text="Set species",
-                   command=self._send_species).grid(row=3, column=4, columnspan=2, sticky="we", **pad)
+                     ).grid(row=1, column=1, columnspan=4, sticky="we", **pad)
+        ttk.Button(dev, text="Set species",
+                   command=self._send_species).grid(row=1, column=5, **pad)
 
-        # Upload to sim (TCP)
+        # Utility buttons
+        util = ttk.Frame(dev)
+        util.grid(row=2, column=0, columnspan=6, sticky="w", **pad)
+        for lbl, fn in [
+            ("Time sync",    self._send_time),
+            ("Status",       lambda: self._send({"cmd": "status"})),
+        ]:
+            ttk.Button(util, text=lbl, command=fn).pack(side="left", padx=4)
+
+        # ── Upload character to sim ───────────────────────────────────────────
         chf = ttk.LabelFrame(parent, text="Upload character to sim")
         chf.pack(fill="x", **pad)
-        chf.columnconfigure(3, weight=1)
-        ttk.Label(chf, text="name").grid(row=0, column=0, sticky="e", **pad)
-        self.char_name = tk.StringVar(value="bufo")
-        ttk.Entry(chf, textvariable=self.char_name, width=14).grid(row=0, column=1, sticky="w")
-        ttk.Button(chf, text="Choose folder…",
-                   command=self._pick_char_folder).grid(row=0, column=2, **pad)
+        chf.columnconfigure(1, weight=1)
+
+        self.char_name   = tk.StringVar(value="")
         self.char_folder = tk.StringVar(value="")
-        ttk.Label(chf, textvariable=self.char_folder, foreground="#888"
-                  ).grid(row=0, column=3, sticky="we", **pad)
+        ttk.Button(chf, text="Choose folder…",
+                   command=self._pick_char_folder).grid(row=0, column=0, **pad)
+        ttk.Label(chf, textvariable=self.char_folder, foreground="#888",
+                  anchor="w").grid(row=0, column=1, sticky="we", **pad)
         self.upload_btn = ttk.Button(chf, text="Upload to sim",
                                      command=self._start_upload)
-        self.upload_btn.grid(row=0, column=4, sticky="e", **pad)
+        self.upload_btn.grid(row=0, column=2, **pad)
         self.char_progress = ttk.Progressbar(chf, mode="determinate")
-        self.char_progress.grid(row=1, column=0, columnspan=4, sticky="we", **pad)
+        self.char_progress.grid(row=1, column=0, columnspan=2, sticky="we", **pad)
         self.char_status = tk.StringVar(value="idle")
         ttk.Label(chf, textvariable=self.char_status, foreground="#888"
-                  ).grid(row=1, column=4, sticky="w", **pad)
+                  ).grid(row=1, column=2, sticky="w", **pad)
 
     # ── Characters tab ────────────────────────────────────────────────────────
 
@@ -533,6 +566,37 @@ class App(tk.Tk):
             "waiting": self.waiting.get(), "tokens": self.tokens.get(),
             "tokens_today": self.tokens_today.get(),
             "msg": self.msg.get(), "entries": entries,
+        })
+
+    def _preset_idle(self):
+        self.total.set(1); self.running.set(0); self.waiting.set(0)
+        self._send_live()
+
+    def _preset_busy(self):
+        self.total.set(1); self.running.set(3); self.waiting.set(0)
+        self._send_live()
+
+    def _preset_attention(self):
+        self.total.set(1); self.running.set(0); self.waiting.set(1)
+        self._send_live()
+
+    def _preset_celebrate(self):
+        # Celebrate is triggered by the "completed" flag in the live payload,
+        # not a cmd. Send it true, then clear it after 3 s so it doesn't stick.
+        self._send({
+            "total": self.total.get(), "running": self.running.get(),
+            "waiting": self.waiting.get(), "tokens": self.tokens.get(),
+            "tokens_today": self.tokens_today.get(),
+            "msg": self.msg.get(), "completed": True,
+        })
+        self.after(3000, self._clear_completed)
+
+    def _clear_completed(self):
+        self._send({
+            "total": self.total.get(), "running": self.running.get(),
+            "waiting": self.waiting.get(), "tokens": self.tokens.get(),
+            "tokens_today": self.tokens_today.get(),
+            "msg": self.msg.get(), "completed": False,
         })
 
     def _send_prompt(self):

@@ -203,7 +203,7 @@ Any key press or screen tap wakes the panel.
 | `idle`      | connected, nothing urgent   | blinking, looking around                  |
 | `busy`      | sessions actively running   | sweating, working                         |
 | `attention` | approval pending            | alert, **red top-bar pulses**             |
-| `celebrate` | level up (every 50K tokens) | confetti, bouncing                        |
+| `celebrate` | level up (every 50K tokens); Celebrate preset in Simulator tab | confetti, bouncing |
 | `dizzy`     | you shook the device        | spiral eyes, wobbling                     |
 | `heart`     | approved in under 5s        | floating hearts                           |
 
