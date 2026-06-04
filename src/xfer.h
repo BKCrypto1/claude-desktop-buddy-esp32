@@ -144,9 +144,10 @@ inline bool xferCommand(JsonDocument& doc) {
     const char* s = doc["state"] | "";
     PersonaState ps = P_IDLE;
     bool ok = true;
-    if      (strcmp(s, "sleep") == 0) ps = P_SLEEP;
-    else if (strcmp(s, "dizzy") == 0) ps = P_DIZZY;
-    else if (strcmp(s, "heart") == 0) ps = P_HEART;
+    if      (strcmp(s, "sleep")     == 0) ps = P_SLEEP;
+    else if (strcmp(s, "dizzy")     == 0) ps = P_DIZZY;
+    else if (strcmp(s, "heart")     == 0) ps = P_HEART;
+    else if (strcmp(s, "celebrate") == 0) ps = P_CELEBRATE;
     else ok = false;
     if (ok) triggerOneShot(ps, 3000);
     _xAck("oneshot", ok);

@@ -1088,7 +1088,7 @@ void loop() {
         uint32_t tookS = (millis() - promptArrivedMs) / 1000;
         statsOnApproval(tookS);
         beep(2400, 60);
-        if (tookS < 5) triggerOneShot(P_HEART, 2000);
+        triggerOneShot(tookS < 5 ? P_HEART : P_CELEBRATE, 2000);
       } else if (resetOpen) {
         beep(1800, 30);
         resetSel = (resetSel + 1) % RESET_N;
@@ -1120,6 +1120,7 @@ void loop() {
       responseSent = true;
       statsOnDenial();
       beep(600, 60);
+      triggerOneShot(P_DIZZY, 2000);
     } else if (resetOpen) {
       beep(2400, 30);
       applyReset(resetSel);
@@ -1165,7 +1166,7 @@ void loop() {
       uint32_t tookS = (millis() - promptArrivedMs) / 1000;
       statsOnApproval(tookS);
       beep(2400, 60);
-      if (tookS < 5) triggerOneShot(P_HEART, 2000);
+      triggerOneShot(tookS < 5 ? P_HEART : P_CELEBRATE, 2000);
     }
     if (tap(0, APPROVAL_TOP + 39, W, 39)) {
       char cmd[96];
@@ -1174,6 +1175,7 @@ void loop() {
       responseSent = true;
       statsOnDenial();
       beep(600, 60);
+      triggerOneShot(P_DIZZY, 2000);
     }
   } else if (menuOpen || settingsOpen || resetOpen) {
     // Tap a menu row → directly select + confirm. Reuses the layout
