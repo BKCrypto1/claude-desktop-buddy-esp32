@@ -291,6 +291,73 @@ class App(tk.Tk):
         ttk.Label(pdx, textvariable=self.petdex_status, foreground="#888",
                   width=28).grid(row=1, column=2, sticky="w", **pad)
 
+        # Strip import
+        STATES = ["sleep", "idle", "busy", "attention", "celebrate", "dizzy", "heart"]
+        # Filename keywords used to auto-guess state mapping when a directory is picked.
+        self._strip_hints = {
+            "idle":      ["idle"],
+            "busy":      ["run", "walk"],
+            "celebrate": ["attack", "jump", "skill"],
+            "attention": ["hit", "hurt"],
+            "sleep":     ["sit", "sleep", "rest"],
+            "dizzy":     ["stun", "roll", "die", "dizzy"],
+            "heart":     ["wave"],
+        }
+        spx = ttk.LabelFrame(self, text="Strip import  (itch.io sprite pack → convert → upload)")
+        spx.pack(fill="x", **pad)
+        spx.columnconfigure(1, weight=1)
+        spx.columnconfigure(4, weight=1)
+
+        # Row 0: directory + name + bg
+        ttk.Label(spx, text="Directory").grid(row=0, column=0, sticky="e", **pad)
+        self.strip_dir = tk.StringVar()
+        ttk.Entry(spx, textvariable=self.strip_dir, width=30
+                  ).grid(row=0, column=1, columnspan=2, sticky="we", **pad)
+        ttk.Button(spx, text="Browse…", command=self._pick_strip_dir
+                   ).grid(row=0, column=3, **pad)
+        ttk.Label(spx, text="Name").grid(row=0, column=4, sticky="e", **pad)
+        self.strip_name = tk.StringVar(value="character")
+        ttk.Entry(spx, textvariable=self.strip_name, width=12
+                  ).grid(row=0, column=5, **pad)
+        ttk.Label(spx, text="BG").grid(row=0, column=6, sticky="e", **pad)
+        self.strip_bg = tk.StringVar(value="000000")
+        ttk.Entry(spx, textvariable=self.strip_bg, width=7
+                  ).grid(row=0, column=7, **pad)
+
+        # Rows 1–4: state dropdowns (left col: sleep/idle/busy/attention, right: celebrate/dizzy/heart)
+        self.strip_state_vars   = {}
+        self.strip_state_combos = {}
+        left_states  = STATES[:4]
+        right_states = STATES[4:]
+        for i, s in enumerate(left_states):
+            ttk.Label(spx, text=s).grid(row=1 + i, column=0, sticky="e", **pad)
+            v  = tk.StringVar(value="—")
+            cb = ttk.Combobox(spx, textvariable=v, width=26, state="readonly")
+            cb.grid(row=1 + i, column=1, columnspan=2, sticky="we", **pad)
+            self.strip_state_vars[s]   = v
+            self.strip_state_combos[s] = cb
+        for i, s in enumerate(right_states):
+            ttk.Label(spx, text=s).grid(row=1 + i, column=4, sticky="e", **pad)
+            v  = tk.StringVar(value="—")
+            cb = ttk.Combobox(spx, textvariable=v, width=26, state="readonly")
+            cb.grid(row=1 + i, column=5, columnspan=2, sticky="we", **pad)
+            self.strip_state_vars[s]   = v
+            self.strip_state_combos[s] = cb
+
+        # Row 5: pixel art + import button
+        self.strip_pixel_art = tk.BooleanVar(value=False)
+        ttk.Checkbutton(spx, text="Pixel art", variable=self.strip_pixel_art
+                        ).grid(row=5, column=0, **pad)
+        self.strip_btn = ttk.Button(spx, text="Import", command=self._start_strip_import)
+        self.strip_btn.grid(row=5, column=1, sticky="w", **pad)
+
+        # Row 6: progress + status
+        self.strip_progress = ttk.Progressbar(spx, mode="determinate", maximum=100)
+        self.strip_progress.grid(row=6, column=0, columnspan=6, sticky="we", **pad)
+        self.strip_status = tk.StringVar(value="idle")
+        ttk.Label(spx, textvariable=self.strip_status, foreground="#888",
+                  width=28).grid(row=6, column=6, columnspan=2, sticky="w", **pad)
+
         # Log
         logf = ttk.LabelFrame(self, text="Log")
         logf.pack(fill="both", expand=True, **pad)
@@ -349,6 +416,11 @@ class App(tk.Tk):
                     self.petdex_status.set(txt)
                     if pct is not None:
                         self.petdex_progress["value"] = pct
+                elif kind == "strip":
+                    txt, pct = payload
+                    self.strip_status.set(txt)
+                    if pct is not None:
+                        self.strip_progress["value"] = pct
         except queue.Empty:
             pass
         self.after(50, self._drain)
@@ -589,6 +661,149 @@ class App(tk.Tk):
             self._qlog("sys", f"[petdex] exception: {exc}")
         finally:
             self.petdex_btn.configure(state="normal")
+
+    # ─── Strip import ───
+    def _set_strip(self, txt, pct=None):
+        self._inq.put(("strip", (txt, pct)))
+
+    def _pick_strip_dir(self):
+        path = filedialog.askdirectory(title="Choose strip sprite directory")
+        if not path:
+            return
+        self.strip_dir.set(path)
+        name = os.path.basename(path.rstrip("/")).lower().replace(" ", "_")
+        if name:
+            self.strip_name.set(name)
+        self._scan_strip_dir(path)
+
+    def _scan_strip_dir(self, path):
+        pngs = sorted(f for f in os.listdir(path) if f.lower().endswith(".png"))
+        if not pngs:
+            return
+        for cb in self.strip_state_combos.values():
+            cb["values"] = pngs
+        # Auto-guess: find first filename containing a hint keyword for each state.
+        for s, hints in self._strip_hints.items():
+            found = None
+            for hint in hints:
+                for fn in pngs:
+                    if hint in fn.lower():
+                        found = fn
+                        break
+                if found:
+                    break
+            self.strip_state_vars[s].set(found or pngs[0])
+        # States with no hint match fall back to the idle guess.
+        idle_guess = self.strip_state_vars["idle"].get()
+        for s in self.strip_state_vars:
+            if self.strip_state_vars[s].get() == "—":
+                self.strip_state_vars[s].set(idle_guess)
+
+    def _start_strip_import(self):
+        src_dir = self.strip_dir.get().strip()
+        if not src_dir:
+            return
+        STATES = ["sleep", "idle", "busy", "attention", "celebrate", "dizzy", "heart"]
+        mapping = {s: self.strip_state_vars[s].get()
+                   for s in STATES if self.strip_state_vars[s].get() not in ("—", "")}
+        name     = self.strip_name.get().strip() or "character"
+        bg       = self.strip_bg.get().strip()   or "000000"
+        pixel_art = self.strip_pixel_art.get()
+        self.strip_btn.configure(state="disabled")
+        threading.Thread(
+            target=self._strip_worker,
+            args=(src_dir, name, bg, mapping, pixel_art),
+            daemon=True,
+        ).start()
+
+    def _strip_worker(self, src_dir, name, bg, mapping, pixel_art):
+        STATES = ["sleep", "idle", "busy", "attention", "celebrate", "dizzy", "heart"]
+        try:
+            repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            out_dir   = os.path.join(repo_root, "characters", name)
+            manifest  = os.path.join(out_dir, "manifest.json")
+
+            if os.path.isfile(manifest):
+                self._set_strip(f"{name} already converted — uploading…", 72)
+                self._qlog("sys", f"[strip] '{name}' found at {out_dir}, skipping conversion")
+            else:
+                self._set_strip(f"Converting {name}…", 5)
+                script = os.path.join(repo_root, "tools", "strip_convert.py")
+                cmd = [sys.executable, "-u", script, src_dir,
+                       "--name", name, "--bg", bg, "--out", out_dir]
+                for s, fn in mapping.items():
+                    cmd += [f"--{s}", fn]
+                if pixel_art:
+                    cmd.append("--pixel-art")
+                self._qlog("sys", f"[strip] {' '.join(cmd)}")
+                proc = subprocess.Popen(
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, bufsize=1,
+                )
+                done = 0
+                for line in proc.stdout:
+                    line = line.rstrip()
+                    if not line:
+                        continue
+                    self._qlog("sys", f"[convert] {line}")
+                    for s in STATES:
+                        if f"{s}.gif" in line:
+                            done += 1
+                            self._set_strip(f"Converting {s} ({done}/{len(STATES)})…",
+                                            5 + done / len(STATES) * 65)
+                proc.wait()
+                if proc.returncode != 0:
+                    self._set_strip("Conversion failed — see log")
+                    return
+
+            # Upload (same protocol as _petdex_worker)
+            self._set_strip("Waiting for sim connection…", 72)
+            if not self.bridge.wait_connected(timeout=15):
+                self._set_strip("Sim not connected — is buddy-sim running?")
+                return
+            self._set_strip("Uploading…", 73)
+
+            files = sorted(
+                p for p in glob.glob(os.path.join(out_dir, "*"))
+                if os.path.isfile(p) and not os.path.basename(p).startswith(".")
+            )
+            total = sum(os.path.getsize(p) for p in files)
+            self._send({"cmd": "char_begin", "name": name, "total": total})
+            a = self._wait_ack("char_begin", 10)
+            if a is None:
+                self._set_strip("char_begin timed out — is sim running?"); return
+            if not a.get("ok"):
+                self._set_strip(f"char_begin rejected: {a.get('error', a)}"); return
+
+            sent = 0
+            for path in files:
+                fn   = os.path.basename(path)
+                data = open(path, "rb").read()
+                self._send({"cmd": "file", "path": fn, "size": len(data)})
+                if not (self._wait_ack("file", 5) or {}).get("ok"):
+                    self._set_strip(f"file open failed: {fn}"); return
+                for i in range(0, len(data), CHUNK_BYTES):
+                    chunk = data[i:i + CHUNK_BYTES]
+                    self._send({"cmd": "chunk", "d": base64.b64encode(chunk).decode()})
+                    if not (self._wait_ack("chunk", 5) or {}).get("ok"):
+                        self._set_strip(f"chunk failed: {fn}+{i}"); return
+                    sent += len(chunk)
+                    self._set_strip(f"Uploading {fn}…", 73 + sent / total * 25)
+                self._send({"cmd": "file_end"})
+                if not (self._wait_ack("file_end", 10) or {}).get("ok"):
+                    self._set_strip(f"file_end failed: {fn}"); return
+
+            self._send({"cmd": "char_end"})
+            ok = (self._wait_ack("char_end", 15) or {}).get("ok")
+            self._set_strip("Done! Character active." if ok else "char_end failed", 100)
+            if ok:
+                self._send({"cmd": "species", "idx": 255})
+
+        except Exception as exc:
+            self._set_strip(f"Error: {exc}")
+            self._qlog("sys", f"[strip] exception: {exc}")
+        finally:
+            self.strip_btn.configure(state="normal")
 
     def _send_time(self):
         now = int(time.time())
