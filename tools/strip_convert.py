@@ -65,28 +65,52 @@ def detect_frame_w(paths, frame_h):
 def extract_frames(sheet, frame_w, frame_h, bg_hex, tmp_dir, label, pixel_art=False):
     strip_w, _ = sheet_dims(sheet)
     n_frames = strip_w // frame_w
-    paths = []
+
+    # Pass 1: crop → flatten → trim bg border → resize.
+    # Trimming removes empty padding so small sprites in large frames get scaled
+    # up to fill 96px rather than staying tiny in a sea of black.
+    raw_paths = []
     for i in range(n_frames):
         x = i * frame_w
-        out = os.path.join(tmp_dir, f"{label}_{i:03d}.png")
+        raw = os.path.join(tmp_dir, f"{label}_{i:03d}_raw.png")
         cmd = ["magick", sheet,
-               "-crop", f"{frame_w}x{frame_h}+{x}+0", "+repage"]
+               "-crop", f"{frame_w}x{frame_h}+{x}+0", "+repage",
+               "-background", f"#{bg_hex}", "-flatten",
+               "-fuzz", "1%", "-trim", "+repage"]
         if pixel_art:
-            # Nearest-neighbour: preserves crisp pixel edges.
             cmd += ["-filter", "point", "-resize", "96x96"]
         else:
-            # Fit within 96×96, preserving aspect ratio.
             cmd += ["-resize", "96x96"]
-        cmd += ["-background", f"#{bg_hex}", "-flatten"]
         if not pixel_art:
-            # Snap to RGB565 palette entries to reduce double-quantisation noise.
             cmd += ["-channel", "R", "-posterize", "32",
                     "-channel", "G", "-posterize", "64",
                     "-channel", "B", "-posterize", "32",
                     "+channel"]
-        cmd.append(out)
+        cmd.append(raw)
         subprocess.run(cmd, check=True, capture_output=True)
+        raw_paths.append(raw)
+
+    # Pass 2: normalize all frames to the same canvas (union bounding box,
+    # centred) so the assembled GIF has consistent full-frame dimensions.
+    max_w = max_h = 0
+    for p in raw_paths:
+        w, h = sheet_dims(p)
+        max_w, max_h = max(max_w, w), max(max_h, h)
+
+    paths = []
+    for i, raw in enumerate(raw_paths):
+        out = os.path.join(tmp_dir, f"{label}_{i:03d}.png")
+        subprocess.run(
+            ["magick", raw,
+             "-gravity", "Center",
+             "-background", f"#{bg_hex}",
+             "-extent", f"{max_w}x{max_h}",
+             out],
+            check=True, capture_output=True,
+        )
         paths.append(out)
+        os.unlink(raw)
+
     return paths
 
 
