@@ -1,28 +1,19 @@
 #!/usr/bin/env python3
 """
-Simulator driver — Tk panel that speaks the Stick's BLE wire protocol
-over a TCP socket on 127.0.0.1:31415, instead of GATT.
+Buddy Manager — tabbed control panel for Claude Buddy devices.
 
-Mirrors what the real Hardware Buddy desktop app pushes:
-  • {"total":N, "running":N, "waiting":N, "tokens":N, "tokens_today":N, "msg":"..."}
-  • {"entries": ["line1", "line2", ...]}
-  • {"prompt": {"id":"...", "tool":"Bash", "hint":"rm -rf"}}
-  • {"time": [epoch_sec, tz_offset_sec]}
-  • {"cmd":"status"} → expects {"ack":"status", ...} reply
-  • {"cmd":"celebrate"}
-  • {"cmd":"owner", "name":"Bryan"}  /  {"cmd":"name", "name":"Buddy"}
-
-Listens for replies (especially {cmd:"permission"} from approval prompts)
-and prints every line in / out to a scrolling log pane.
+  Simulator  tab — drive the desktop sim over TCP (live state, prompts, species)
+  Characters tab — convert, manage, and install character packs (sim / USB / BLE)
+  Firmware   tab — flash firmware and filesystem to real hardware via USB
 
 Usage:
     python3 tools/sim_driver.py
 
-(With the simulator built and running:
-    cd sim && make run
-)
+    Simulator tab requires:  cd sim && make run
+    BLE upload requires:     pip install bleak
 """
 import base64
+import configparser
 import glob
 import json
 import os
@@ -38,10 +29,8 @@ from tkinter import filedialog, ttk, scrolledtext
 
 HOST = "127.0.0.1"
 PORT = 31415
-CHUNK_BYTES = 256   # matches tools/test_xfer.py — keeps {cmd,d:b64} under ~400 bytes
+CHUNK_BYTES = 256
 
-# ASCII species names in the same order as src/buddy.cpp:94-99 SPECIES_TABLE.
-# Index ↔ name mapping: send {"cmd":"species","idx":N}.
 SPECIES_NAMES = [
     "capybara", "duck", "goose", "blob",
     "cat", "dragon", "octopus", "owl",
@@ -50,22 +39,28 @@ SPECIES_NAMES = [
     "mushroom", "chonk", "dog",
 ]
 
+REPO_ROOT  = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CHARS_DIR  = os.path.join(REPO_ROOT, "characters")
+TOOLS_DIR  = os.path.join(REPO_ROOT, "tools")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TCP bridge to simulator
+# ─────────────────────────────────────────────────────────────────────────────
 
 class Bridge:
     """Background TCP socket; reconnects until cancelled."""
 
     def __init__(self, on_line, on_state):
-        self._on_line = on_line          # callback(str) — incoming JSON line
-        self._on_state = on_state        # callback(bool connected)
-        self._sock = None
-        self._stop = threading.Event()
-        self._connected = threading.Event()   # set when socket is live
-        self._tx = queue.Queue()
-        self._t = threading.Thread(target=self._run, daemon=True)
-        self._t.start()
+        self._on_line  = on_line
+        self._on_state = on_state
+        self._sock      = None
+        self._stop      = threading.Event()
+        self._connected = threading.Event()
+        self._tx        = queue.Queue()
+        threading.Thread(target=self._run, daemon=True).start()
 
     def wait_connected(self, timeout=10.0):
-        """Block until connected (or timeout). Returns True if connected."""
         return self._connected.wait(timeout=timeout)
 
     def send(self, obj):
@@ -105,14 +100,11 @@ class Bridge:
     def _pump(self):
         buf = b""
         while not self._stop.is_set():
-            # TX
             try:
                 while True:
-                    out = self._tx.get_nowait()
-                    self._sock.sendall(out)
+                    self._sock.sendall(self._tx.get_nowait())
             except queue.Empty:
                 pass
-            # RX
             try:
                 chunk = self._sock.recv(1024)
                 if not chunk:
@@ -130,79 +122,104 @@ class Bridge:
                 return
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Main app
+# ─────────────────────────────────────────────────────────────────────────────
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Buddy Sim Driver")
-        self.geometry("900x820")
-        self.minsize(820, 700)
-        self.bridge = Bridge(self._enqueue_line, self._enqueue_state)
-        self._inq = queue.Queue()
-        # ack waiters: ack-name → queue of decoded-JSON dicts. Populated in
-        # _drain when an incoming RX line is an ack the upload worker is
-        # waiting on. Lets us pump UI updates from the main thread while a
-        # background thread sequences a multi-step transfer.
-        self._ack_waiters = {}        # name → queue.Queue
-        self._ack_lock = threading.Lock()
+        self.title("Buddy Manager")
+        self.geometry("1020x960")
+        self.minsize(900, 780)
+        self.bridge      = Bridge(self._enqueue_line, self._enqueue_state)
+        self._inq        = queue.Queue()
+        self._ack_waiters = {}
+        self._ack_lock   = threading.Lock()
         self._upload_thread = None
         self._build_ui()
         self.after(50, self._drain)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
+    # ── UI construction ───────────────────────────────────────────────────────
+
     def _build_ui(self):
         pad = {"padx": 6, "pady": 3}
 
-        # Connection status
-        top = ttk.Frame(self)
-        top.pack(fill="x", **pad)
-        self.status = tk.StringVar(value="disconnected")
-        ttk.Label(top, text="Sim:").pack(side="left")
-        ttk.Label(top, textvariable=self.status, foreground="red").pack(side="left", padx=4)
+        # ── status bar (always visible, above tabs) ──
+        bar = ttk.Frame(self)
+        bar.pack(fill="x", **pad)
+        ttk.Label(bar, text="Sim:").pack(side="left")
+        self.sim_status = tk.StringVar(value="disconnected")
+        self._sim_status_label = ttk.Label(bar, textvariable=self.sim_status,
+                                           foreground="red")
+        self._sim_status_label.pack(side="left", padx=4)
 
-        # Live data. Sessions: total/running/waiting are small ints — the
-        # state machine in src/main.cpp:478-484 only cares about
-        # `waiting>0` (→ attention) and `running>=3` (→ busy), so a 0..8
-        # spinbox is plenty and lets the whole row collapse to one line.
-        live = ttk.LabelFrame(self, text="Live Claude state")
+        # ── notebook ──
+        nb = ttk.Notebook(self)
+        nb.pack(fill="both", expand=True, **pad)
+
+        sim_tab  = ttk.Frame(nb)
+        char_tab = ttk.Frame(nb)
+        fw_tab   = ttk.Frame(nb)
+        nb.add(sim_tab,  text="  Simulator  ")
+        nb.add(char_tab, text="  Characters  ")
+        nb.add(fw_tab,   text="  Firmware  ")
+
+        self._build_simulator_tab(sim_tab,  pad)
+        self._build_characters_tab(char_tab, pad)
+        self._build_firmware_tab(fw_tab,    pad)
+
+        # ── shared log (always visible below tabs) ──
+        logf = ttk.LabelFrame(self, text="Log")
+        logf.pack(fill="both", expand=False, **pad)
+        self.log = scrolledtext.ScrolledText(logf, height=10, font=("Menlo", 10))
+        self.log.pack(fill="both", expand=True)
+        self.log.tag_config("tx",  foreground="#0066cc")
+        self.log.tag_config("rx",  foreground="#006600")
+        self.log.tag_config("sys", foreground="#888888")
+
+    # ── Simulator tab ─────────────────────────────────────────────────────────
+
+    def _build_simulator_tab(self, parent, pad):
+        # Live Claude state
+        live = ttk.LabelFrame(parent, text="Live Claude state")
         live.pack(fill="x", **pad)
         self.total = tk.IntVar(value=0)
         self.running = tk.IntVar(value=0)
         self.waiting = tk.IntVar(value=0)
-        sessions = ttk.Frame(live)
-        sessions.grid(row=0, column=0, columnspan=2, sticky="w", **pad)
+        sess = ttk.Frame(live)
+        sess.grid(row=0, column=0, columnspan=2, sticky="w", **pad)
         for col, (lbl, var) in enumerate([
-                ("total", self.total),
-                ("running", self.running),
-                ("waiting", self.waiting)]):
-            ttk.Label(sessions, text=lbl).grid(row=0, column=col * 2, sticky="e", padx=(8, 2))
-            ttk.Spinbox(sessions, from_=0, to=99, textvariable=var, width=4
-                        ).grid(row=0, column=col * 2 + 1, sticky="w")
+                ("total", self.total), ("running", self.running), ("waiting", self.waiting)]):
+            ttk.Label(sess, text=lbl).grid(row=0, column=col*2,   sticky="e", padx=(8, 2))
+            ttk.Spinbox(sess, from_=0, to=99, textvariable=var, width=4
+                        ).grid(row=0, column=col*2+1, sticky="w")
 
         self.tokens = tk.IntVar(value=0)
         self.tokens_today = tk.IntVar(value=0)
-        tokens_row = ttk.Frame(live)
-        tokens_row.grid(row=1, column=0, columnspan=2, sticky="w", **pad)
-        ttk.Label(tokens_row, text="tokens").grid(row=0, column=0, sticky="e", padx=(8, 2))
-        ttk.Spinbox(tokens_row, from_=0, to=10**7, increment=1000,
+        tok = ttk.Frame(live)
+        tok.grid(row=1, column=0, columnspan=2, sticky="w", **pad)
+        ttk.Label(tok, text="tokens").grid(row=0, column=0, sticky="e", padx=(8, 2))
+        ttk.Spinbox(tok, from_=0, to=10**7, increment=1000,
                     textvariable=self.tokens, width=10).grid(row=0, column=1, sticky="w")
-        ttk.Label(tokens_row, text="today").grid(row=0, column=2, sticky="e", padx=(16, 2))
-        ttk.Spinbox(tokens_row, from_=0, to=10**7, increment=1000,
+        ttk.Label(tok, text="today").grid(row=0, column=2, sticky="e", padx=(16, 2))
+        ttk.Spinbox(tok, from_=0, to=10**7, increment=1000,
                     textvariable=self.tokens_today, width=10).grid(row=0, column=3, sticky="w")
 
         ttk.Label(live, text="msg").grid(row=2, column=0, sticky="e", **pad)
         self.msg = tk.StringVar()
         ttk.Entry(live, textvariable=self.msg).grid(row=2, column=1, sticky="we", **pad)
 
-        ttk.Label(live, text="entries (one per line)").grid(row=3, column=0, sticky="ne", **pad)
-        self.entries = tk.Text(live, height=4, width=44)
+        ttk.Label(live, text="entries").grid(row=3, column=0, sticky="ne", **pad)
+        self.entries = tk.Text(live, height=3, width=44)
         self.entries.grid(row=3, column=1, sticky="we", **pad)
-
-        ttk.Button(live, text="Send live update", command=self._send_live).grid(
-            row=4, column=1, sticky="e", **pad)
+        ttk.Button(live, text="Send live update",
+                   command=self._send_live).grid(row=4, column=1, sticky="e", **pad)
         live.columnconfigure(1, weight=1)
 
-        # Approvals + commands
-        ctl = ttk.LabelFrame(self, text="Commands")
+        # Commands
+        ctl = ttk.LabelFrame(parent, text="Commands")
         ctl.pack(fill="x", **pad)
         ctl.columnconfigure(3, weight=1)
 
@@ -215,14 +232,14 @@ class App(tk.Tk):
         ttk.Button(ctl, text="Send approval prompt",
                    command=self._send_prompt).grid(row=0, column=4, columnspan=2, sticky="we", **pad)
 
-        action_row = ttk.Frame(ctl)
-        action_row.grid(row=1, column=0, columnspan=6, sticky="we", **pad)
+        acts = ttk.Frame(ctl)
+        acts.grid(row=1, column=0, columnspan=6, sticky="we", **pad)
         for i, (lbl, fn) in enumerate([
-                ("Time sync now", self._send_time),
-                ("Trigger celebrate", lambda: self._send({"cmd": "celebrate"})),
-                ("Status",       lambda: self._send({"cmd": "status"})),
+                ("Time sync", self._send_time),
+                ("Celebrate", lambda: self._send({"cmd": "celebrate"})),
+                ("Status",    lambda: self._send({"cmd": "status"})),
                 ("Clear prompt", lambda: self._send({"prompt": None}))]):
-            ttk.Button(action_row, text=lbl, command=fn).grid(row=0, column=i, padx=4)
+            ttk.Button(acts, text=lbl, command=fn).grid(row=0, column=i, padx=4)
 
         ttk.Label(ctl, text="owner").grid(row=2, column=0, sticky="e", **pad)
         self.owner = tk.StringVar(value="Bryan")
@@ -237,23 +254,17 @@ class App(tk.Tk):
                    command=lambda: self._send({"cmd": "name", "name": self.pet.get()})
                    ).grid(row=2, column=5, sticky="w", **pad)
 
-        # Species pick — dropdown of named ASCII species, or "GIF" to use
-        # the uploaded character. Mirrors the Settings → "ascii pet" cycle
-        # on the device. Sends {"cmd":"species","idx":N} where idx=255 (0xFF)
-        # means "use uploaded GIF".
         ttk.Label(ctl, text="species").grid(row=3, column=0, sticky="e", **pad)
         self.species_choice = tk.StringVar(value="GIF (uploaded character)")
-        species_options = ["GIF (uploaded character)"] + [
-            f"{i}: {n}" for i, n in enumerate(SPECIES_NAMES)
-        ]
-        ttk.Combobox(ctl, textvariable=self.species_choice,
-                     values=species_options, state="readonly", width=24
+        ttk.Combobox(ctl, textvariable=self.species_choice, state="readonly", width=24,
+                     values=["GIF (uploaded character)"] + [
+                         f"{i}: {n}" for i, n in enumerate(SPECIES_NAMES)]
                      ).grid(row=3, column=1, columnspan=3, sticky="we", **pad)
         ttk.Button(ctl, text="Set species",
                    command=self._send_species).grid(row=3, column=4, columnspan=2, sticky="we", **pad)
 
-        # Character upload
-        chf = ttk.LabelFrame(self, text="Character upload")
+        # Upload to sim (TCP)
+        chf = ttk.LabelFrame(parent, text="Upload character to sim")
         chf.pack(fill="x", **pad)
         chf.columnconfigure(3, weight=1)
         ttk.Label(chf, text="name").grid(row=0, column=0, sticky="e", **pad)
@@ -264,7 +275,7 @@ class App(tk.Tk):
         self.char_folder = tk.StringVar(value="")
         ttk.Label(chf, textvariable=self.char_folder, foreground="#888"
                   ).grid(row=0, column=3, sticky="we", **pad)
-        self.upload_btn = ttk.Button(chf, text="Upload character",
+        self.upload_btn = ttk.Button(chf, text="Upload to sim",
                                      command=self._start_upload)
         self.upload_btn.grid(row=0, column=4, sticky="e", **pad)
         self.char_progress = ttk.Progressbar(chf, mode="determinate")
@@ -273,17 +284,53 @@ class App(tk.Tk):
         ttk.Label(chf, textvariable=self.char_status, foreground="#888"
                   ).grid(row=1, column=4, sticky="w", **pad)
 
-        # Petdex import
-        pdx = ttk.LabelFrame(self, text="Petdex import  (download → convert → upload)")
+    # ── Characters tab ────────────────────────────────────────────────────────
+
+    def _build_characters_tab(self, parent, pad):
+        # ── My Characters list ──
+        mf = ttk.LabelFrame(parent, text="My Characters")
+        mf.pack(fill="x", **pad)
+        mf.columnconfigure(0, weight=1)
+
+        cols = ("name", "files", "size")
+        self.char_tree = ttk.Treeview(mf, columns=cols, show="headings", height=5,
+                                      selectmode="browse")
+        self.char_tree.heading("name",  text="Name")
+        self.char_tree.heading("files", text="Files")
+        self.char_tree.heading("size",  text="Size")
+        self.char_tree.column("name",  width=180)
+        self.char_tree.column("files", width=50,  anchor="center")
+        self.char_tree.column("size",  width=80,  anchor="e")
+        self.char_tree.grid(row=0, column=0, sticky="nswe", **pad)
+
+        vsb = ttk.Scrollbar(mf, orient="vertical", command=self.char_tree.yview)
+        vsb.grid(row=0, column=1, sticky="ns", pady=3)
+        self.char_tree.configure(yscrollcommand=vsb.set)
+
+        btns = ttk.Frame(mf)
+        btns.grid(row=1, column=0, sticky="we", **pad)
+        ttk.Button(btns, text="Upload to sim", command=self._char_upload_sim ).pack(side="left", padx=3)
+        ttk.Button(btns, text="Flash USB",     command=self._char_flash_usb  ).pack(side="left", padx=3)
+        ttk.Button(btns, text="Upload BLE",    command=self._char_upload_ble ).pack(side="left", padx=3)
+        ttk.Button(btns, text="Refresh",       command=self._refresh_chars   ).pack(side="right", padx=3)
+
+        self._char_action_progress = ttk.Progressbar(mf, mode="indeterminate")
+        self._char_action_progress.grid(row=2, column=0, sticky="we", padx=6, pady=2)
+
+        self._refresh_chars()
+
+        # ── Petdex import ──
+        pdx = ttk.LabelFrame(parent, text="Petdex import  (download → convert → upload to sim)")
         pdx.pack(fill="x", **pad)
         pdx.columnconfigure(1, weight=1)
         ttk.Label(pdx, text="URL or name").grid(row=0, column=0, sticky="e", **pad)
         self.petdex_url = tk.StringVar(value="https://petdex.crafter.run/pets/mallow")
         ttk.Entry(pdx, textvariable=self.petdex_url).grid(row=0, column=1, sticky="we", **pad)
         self.petdex_pixel_art = tk.BooleanVar(value=False)
-        ttk.Checkbutton(pdx, text="Pixel art", variable=self.petdex_pixel_art
-                        ).grid(row=0, column=2, **pad)
-        self.petdex_btn = ttk.Button(pdx, text="Import", command=self._start_petdex_import)
+        ttk.Checkbutton(pdx, text="Pixel art",
+                        variable=self.petdex_pixel_art).grid(row=0, column=2, **pad)
+        self.petdex_btn = ttk.Button(pdx, text="Import",
+                                     command=self._start_petdex_import)
         self.petdex_btn.grid(row=0, column=3, **pad)
         self.petdex_progress = ttk.Progressbar(pdx, mode="determinate", maximum=100)
         self.petdex_progress.grid(row=1, column=0, columnspan=2, sticky="we", **pad)
@@ -291,9 +338,8 @@ class App(tk.Tk):
         ttk.Label(pdx, textvariable=self.petdex_status, foreground="#888",
                   width=28).grid(row=1, column=2, sticky="w", **pad)
 
-        # Strip import
+        # ── Strip import ──
         STATES = ["sleep", "idle", "busy", "attention", "celebrate", "dizzy", "heart"]
-        # Filename keywords used to auto-guess state mapping when a directory is picked.
         self._strip_hints = {
             "idle":      ["idle"],
             "busy":      ["run", "walk"],
@@ -303,14 +349,13 @@ class App(tk.Tk):
             "dizzy":     ["stun", "roll", "die", "dizzy"],
             "heart":     ["wave"],
         }
-        spx = ttk.LabelFrame(self, text="Strip import  (itch.io sprite pack → convert → upload)")
+        spx = ttk.LabelFrame(parent, text="Strip import  (itch.io sprite pack → convert → upload to sim)")
         spx.pack(fill="x", **pad)
         spx.columnconfigure(1, weight=1)
         spx.columnconfigure(5, weight=1)
         spx.columnconfigure(0, minsize=65)
         spx.columnconfigure(4, minsize=65)
 
-        # Row 0: directory + name + bg
         ttk.Label(spx, text="Directory").grid(row=0, column=0, sticky="e", **pad)
         self.strip_dir = tk.StringVar()
         ttk.Entry(spx, textvariable=self.strip_dir, width=30
@@ -326,53 +371,87 @@ class App(tk.Tk):
         ttk.Entry(spx, textvariable=self.strip_bg, width=7
                   ).grid(row=0, column=7, **pad)
 
-        # Rows 1–4: state dropdowns (left col: sleep/idle/busy/attention, right: celebrate/dizzy/heart)
         self.strip_state_vars   = {}
         self.strip_state_combos = {}
-        left_states  = STATES[:4]
-        right_states = STATES[4:]
-        for i, s in enumerate(left_states):
-            ttk.Label(spx, text=s).grid(row=1 + i, column=0, sticky="e", **pad)
+        for i, s in enumerate(STATES[:4]):
+            ttk.Label(spx, text=s).grid(row=1+i, column=0, sticky="e", **pad)
             v  = tk.StringVar(value="—")
             cb = ttk.Combobox(spx, textvariable=v, width=26, state="readonly")
-            cb.grid(row=1 + i, column=1, columnspan=2, sticky="we", **pad)
-            self.strip_state_vars[s]   = v
-            self.strip_state_combos[s] = cb
-        for i, s in enumerate(right_states):
-            ttk.Label(spx, text=s).grid(row=1 + i, column=4, sticky="e", **pad)
+            cb.grid(row=1+i, column=1, columnspan=2, sticky="we", **pad)
+            self.strip_state_vars[s] = v;  self.strip_state_combos[s] = cb
+        for i, s in enumerate(STATES[4:]):
+            ttk.Label(spx, text=s).grid(row=1+i, column=4, sticky="e", **pad)
             v  = tk.StringVar(value="—")
             cb = ttk.Combobox(spx, textvariable=v, width=26, state="readonly")
-            cb.grid(row=1 + i, column=5, columnspan=2, sticky="we", **pad)
-            self.strip_state_vars[s]   = v
-            self.strip_state_combos[s] = cb
+            cb.grid(row=1+i, column=5, columnspan=2, sticky="we", **pad)
+            self.strip_state_vars[s] = v;  self.strip_state_combos[s] = cb
 
-        # Row 5: pixel art + import button
         self.strip_pixel_art = tk.BooleanVar(value=False)
-        ttk.Checkbutton(spx, text="Pixel art", variable=self.strip_pixel_art
-                        ).grid(row=5, column=0, **pad)
+        ttk.Checkbutton(spx, text="Pixel art",
+                        variable=self.strip_pixel_art).grid(row=5, column=0, **pad)
         self.strip_btn = ttk.Button(spx, text="Import", command=self._start_strip_import)
         self.strip_btn.grid(row=5, column=1, sticky="w", **pad)
-
-        # Row 6: progress + status
         self.strip_progress = ttk.Progressbar(spx, mode="determinate", maximum=100)
         self.strip_progress.grid(row=6, column=0, columnspan=6, sticky="we", **pad)
         self.strip_status = tk.StringVar(value="idle")
         ttk.Label(spx, textvariable=self.strip_status, foreground="#888",
                   width=28).grid(row=6, column=6, columnspan=2, sticky="w", **pad)
 
-        # Log
-        logf = ttk.LabelFrame(self, text="Log")
-        logf.pack(fill="both", expand=True, **pad)
-        self.log = scrolledtext.ScrolledText(logf, height=14, font=("Menlo", 10))
-        self.log.pack(fill="both", expand=True)
-        self.log.tag_config("tx", foreground="#0066cc")
-        self.log.tag_config("rx", foreground="#006600")
-        self.log.tag_config("sys", foreground="#888888")
+    # ── Firmware tab ──────────────────────────────────────────────────────────
 
-    # ─── socket → UI ───
+    def _build_firmware_tab(self, parent, pad):
+        # Read env names from platformio.ini
+        ini_path = os.path.join(REPO_ROOT, "platformio.ini")
+        cfg = configparser.ConfigParser()
+        cfg.read(ini_path)
+        envs = [s[4:] for s in cfg.sections() if s.startswith("env:") and s != "env:"]
+        if not envs:
+            envs = ["waveshare-esp32s3-touch-amoled-2-16"]
+
+        fw = ttk.LabelFrame(parent, text="Flash hardware via USB  (requires PlatformIO)")
+        fw.pack(fill="x", **pad)
+        fw.columnconfigure(1, weight=1)
+
+        ttk.Label(fw, text="Board").grid(row=0, column=0, sticky="e", **pad)
+        self.fw_env = tk.StringVar(value=envs[-1])   # default to 2.16
+        ttk.Combobox(fw, textvariable=self.fw_env, values=envs,
+                     state="readonly", width=42
+                     ).grid(row=0, column=1, sticky="we", **pad)
+
+        btn_row = ttk.Frame(fw)
+        btn_row.grid(row=1, column=0, columnspan=2, sticky="we", **pad)
+        self.fw_btn = ttk.Button(btn_row, text="Flash Firmware",
+                                 command=self._flash_firmware)
+        self.fw_btn.pack(side="left", padx=4)
+        self.fs_btn = ttk.Button(btn_row, text="Flash Filesystem",
+                                 command=self._flash_filesystem)
+        self.fs_btn.pack(side="left", padx=4)
+        ttk.Label(btn_row, text="(connect USB before flashing)",
+                  foreground="#888").pack(side="left", padx=12)
+
+        self.fw_progress = ttk.Progressbar(fw, mode="indeterminate")
+        self.fw_progress.grid(row=2, column=0, columnspan=2, sticky="we", **pad)
+        self.fw_status = tk.StringVar(value="idle")
+        ttk.Label(fw, textvariable=self.fw_status, foreground="#888"
+                  ).grid(row=3, column=0, columnspan=2, sticky="w", **pad)
+
+        # Board guide
+        guide = ttk.LabelFrame(parent, text="Board → env reference")
+        guide.pack(fill="x", **pad)
+        rows = [
+            ("ESP32-S3-Touch-AMOLED-2.16",  "waveshare-esp32s3-touch-amoled-2-16"),
+            ("ESP32-C6-Touch-AMOLED-2.16",  "waveshare-esp32c6-touch-amoled-2-16"),
+            ("ESP32-S3-Touch-AMOLED-1.8",   "waveshare-esp32s3-touch-amoled-1-8"),
+            ("ESP32-S3-Touch-AMOLED-1.75C", "waveshare-esp32s3-touch-amoled-1-75c"),
+        ]
+        for r, (board, env) in enumerate(rows):
+            ttk.Label(guide, text=board, width=32).grid(row=r, column=0, sticky="w", **pad)
+            ttk.Label(guide, text=env, foreground="#555",
+                      font=("Menlo", 10)).grid(row=r, column=1, sticky="w", **pad)
+
+    # ─── socket → UI ─────────────────────────────────────────────────────────
+
     def _enqueue_line(self, s):
-        # Route acks to any blocked upload worker BEFORE logging — the worker
-        # runs on its own thread and will wake on the matching ack queue.
         try:
             obj = json.loads(s)
             ack = obj.get("ack")
@@ -386,7 +465,6 @@ class App(tk.Tk):
         self._inq.put(("rx", s))
 
     def _wait_ack(self, name, timeout=5.0):
-        """Block the calling thread until the firmware acks `name` (or timeout)."""
         q = queue.Queue()
         with self._ack_lock:
             self._ack_waiters[name] = q
@@ -410,9 +488,9 @@ class App(tk.Tk):
                 elif kind == "log":
                     self._log(*payload)
                 elif kind == "state":
-                    self.status.set("connected" if payload else "disconnected")
-                    self.tk.call(self.children["!frame"].children["!label2"], "configure",
-                                 "-foreground", "green" if payload else "red")
+                    self.sim_status.set("connected" if payload else "disconnected")
+                    self._sim_status_label.configure(
+                        foreground="green" if payload else "red")
                 elif kind == "pdx":
                     txt, pct = payload
                     self.petdex_status.set(txt)
@@ -423,215 +501,102 @@ class App(tk.Tk):
                     self.strip_status.set(txt)
                     if pct is not None:
                         self.strip_progress["value"] = pct
+                elif kind == "fw":
+                    txt, running = payload
+                    self.fw_status.set(txt)
+                    if running:
+                        self.fw_progress.start(10)
+                    else:
+                        self.fw_progress.stop()
+                elif kind == "char_status":
+                    txt, pct = payload
+                    self.char_status.set(txt)
+                    if pct is not None:
+                        self.char_progress["value"] = pct
         except queue.Empty:
             pass
         self.after(50, self._drain)
 
-    # ─── outgoing helpers ───
+    # ─── outgoing helpers ─────────────────────────────────────────────────────
+
     def _send(self, obj):
         line = self.bridge.send(obj)
         self._inq.put(("log", ("tx", line)))
 
+    def _qlog(self, kind, line):
+        self._inq.put(("log", (kind, line)))
+
     def _send_live(self):
         entries = [s for s in self.entries.get("1.0", "end").splitlines() if s.strip()]
         self._send({
-            "total":   self.total.get(),
-            "running": self.running.get(),
-            "waiting": self.waiting.get(),
-            "tokens":  self.tokens.get(),
+            "total": self.total.get(), "running": self.running.get(),
+            "waiting": self.waiting.get(), "tokens": self.tokens.get(),
             "tokens_today": self.tokens_today.get(),
-            "msg":     self.msg.get(),
-            "entries": entries,
+            "msg": self.msg.get(), "entries": entries,
         })
 
     def _send_prompt(self):
         pid = "p_%d" % int(time.time() * 1000)
-        self._send({"prompt": {"id": pid, "tool": self.tool.get(), "hint": self.hint.get()}})
+        self._send({"prompt": {"id": pid, "tool": self.tool.get(),
+                                "hint": self.hint.get()}})
 
     def _send_species(self):
         choice = self.species_choice.get()
-        # "GIF (uploaded character)" → 0xFF; "12: axolotl" → 12.
         idx = 255 if choice.startswith("GIF") else int(choice.split(":", 1)[0])
         self._send({"cmd": "species", "idx": idx})
 
-    # ─── character upload ───
+    def _send_time(self):
+        now = int(time.time())
+        tz = -time.timezone if time.daylight == 0 else -time.altzone
+        self._send({"time": [now, tz]})
+
+    # ─── character upload (sim TCP) ───────────────────────────────────────────
+
     def _pick_char_folder(self):
         path = filedialog.askdirectory(
-            title="Choose character folder (must contain manifest.json + .gif files)",
-            initialdir=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            title="Choose character folder (manifest.json + .gif files)",
+            initialdir=REPO_ROOT,
         )
         if path:
             self.char_folder.set(path)
             base = os.path.basename(path.rstrip("/"))
-            if base and self.char_name.get() == "bufo":
+            if base:
                 self.char_name.set(base)
 
     def _start_upload(self):
         if self._upload_thread and self._upload_thread.is_alive():
             return
         folder = self.char_folder.get()
-        name = self.char_name.get().strip() or "pet"
+        name   = self.char_name.get().strip() or "pet"
         if not folder or not os.path.isdir(folder):
             self.char_status.set("pick a folder first")
             return
         self.upload_btn.configure(state="disabled")
         self._upload_thread = threading.Thread(
-            target=self._upload_worker, args=(folder, name), daemon=True)
+            target=self._upload_to_sim, args=(folder, name,
+                lambda t, p=None: self._inq.put(("char_status", (t, p))),
+                lambda: self.upload_btn.configure(state="normal")),
+            daemon=True)
         self._upload_thread.start()
 
-    def _set_status(self, txt, pct=None):
-        # tk vars are thread-safe enough for short strings; if this gets flaky,
-        # switch to scheduling on the inq.
-        self.char_status.set(txt)
-        if pct is not None:
-            self.char_progress["value"] = pct
-
-    def _upload_worker(self, folder, name):
+    def _upload_to_sim(self, folder, name, set_status, on_done):
+        """Shared upload-to-sim worker. Calls set_status(txt, pct) and on_done() when complete."""
         try:
             files = sorted(
                 p for p in glob.glob(os.path.join(folder, "*"))
                 if os.path.isfile(p) and not os.path.basename(p).startswith(".")
             )
             if not files:
-                self._set_status("no files in folder")
-                return
+                set_status("no files in folder"); return
             total = sum(os.path.getsize(p) for p in files)
-            self._set_status(f"begin {name} ({len(files)} files, {total} bytes)…", 0)
+            set_status(f"starting ({len(files)} files, {total} bytes)…", 0)
 
             self._send({"cmd": "char_begin", "name": name, "total": total})
             a = self._wait_ack("char_begin", timeout=10)
-            if not a or not a.get("ok"):
-                self._set_status(f"char_begin failed: {a}")
-                return
-
-            sent = 0
-            for path in files:
-                fn = os.path.basename(path)
-                data = open(path, "rb").read()
-                self._send({"cmd": "file", "path": fn, "size": len(data)})
-                a = self._wait_ack("file", timeout=5)
-                if not a or not a.get("ok"):
-                    self._set_status(f"file open failed: {fn}")
-                    return
-                for i in range(0, len(data), CHUNK_BYTES):
-                    chunk = data[i:i + CHUNK_BYTES]
-                    self._send({"cmd": "chunk",
-                                "d": base64.b64encode(chunk).decode()})
-                    a = self._wait_ack("chunk", timeout=5)
-                    if not a or not a.get("ok"):
-                        self._set_status(f"chunk failed at {fn}+{i}")
-                        return
-                    sent += len(chunk)
-                    self._set_status(f"{fn} ({sent}/{total})", sent * 100.0 / total)
-                self._send({"cmd": "file_end"})
-                a = self._wait_ack("file_end", timeout=10)
-                if not a or not a.get("ok"):
-                    self._set_status(f"file_end failed: {fn}")
-                    return
-
-            self._send({"cmd": "char_end"})
-            a = self._wait_ack("char_end", timeout=15)
-            if a and a.get("ok"):
-                self._set_status("done.", 100)
-            else:
-                self._set_status(f"char_end failed: {a}")
-        finally:
-            self.upload_btn.configure(state="normal")
-
-    # ─── Petdex import ───
-    def _set_pdx(self, txt, pct=None):
-        """Thread-safe status + progress update (routes through _inq)."""
-        self._inq.put(("pdx", (txt, pct)))
-
-    def _qlog(self, kind, line):
-        """Thread-safe log write from background threads."""
-        self._inq.put(("log", (kind, line)))
-
-    def _start_petdex_import(self):
-        url = self.petdex_url.get().strip()
-        if not url:
-            return
-        self.petdex_btn.configure(state="disabled")
-        pixel_art = self.petdex_pixel_art.get()
-        threading.Thread(target=self._petdex_worker, args=(url, pixel_art), daemon=True).start()
-
-    def _petdex_worker(self, url_or_name, pixel_art=False):
-        STATES = ["sleep", "idle", "busy", "attention", "celebrate", "dizzy", "heart"]
-        try:
-            # ── 1. Parse pet name ──────────────────────────────────────────
-            name = re.split(r"[/?#]", url_or_name.rstrip("/"))[-1] or url_or_name
-            repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            out_dir   = os.path.join(repo_root, "characters", name)
-            manifest  = os.path.join(out_dir, "manifest.json")
-
-            # ── 2. Skip download+convert if pack already exists ────────────
-            if os.path.isfile(manifest):
-                self._set_pdx(f"{name} already converted — uploading…", 72)
-                self._qlog("sys", f"[petdex] '{name}' found at {out_dir}, skipping download")
-            else:
-                self._set_pdx(f"Downloading {name}…", 2)
-                self._qlog("sys", f"[petdex] installing '{name}'")
-
-            # ── 3. Download + convert (skipped if pack already exists) ─────
-                install_url = f"https://petdex.crafter.run/install/{name}"
-                r = subprocess.run(
-                    ["sh", "-c", f"curl -sSf '{install_url}' | sh"],
-                    capture_output=True, text=True,
-                )
-                if r.returncode != 0:
-                    self._set_pdx(f"Download failed: {r.stderr.strip()[:50]}")
-                    self._qlog("sys", f"[petdex] error: {r.stderr.strip()}")
-                    return
-
-                sheet = os.path.expanduser(f"~/.codex/pets/{name}/spritesheet.webp")
-                if not os.path.exists(sheet):
-                    self._set_pdx("spritesheet not found after install")
-                    return
-                self._set_pdx("Download done, converting…", 18)
-
-                script = os.path.join(repo_root, "tools", "petdex_convert.py")
-                cmd = [sys.executable, "-u", script, sheet, "--name", name, "--out", out_dir]
-                if pixel_art:
-                    cmd.append("--pixel-art")
-                proc = subprocess.Popen(cmd,
-                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    text=True, bufsize=1,
-                )
-                done = 0
-                for line in proc.stdout:
-                    line = line.rstrip()
-                    if not line:
-                        continue
-                    self._qlog("sys", f"[convert] {line}")
-                    for state in STATES:
-                        if f"{state}.gif" in line:
-                            done += 1
-                            pct = 20 + done / len(STATES) * 50
-                            self._set_pdx(f"Converting {state} ({done}/{len(STATES)})…", pct)
-                proc.wait()
-                if proc.returncode != 0:
-                    self._set_pdx("Conversion failed — see log")
-                    return
-
-            # ── 4. Wait for sim connection before upload ───────────────────
-            self._set_pdx("Waiting for sim connection…", 72)
-            if not self.bridge.wait_connected(timeout=15):
-                self._set_pdx("Sim not connected — is buddy-sim running?")
-                return
-            self._set_pdx("Uploading…", 73)
-
-            # ── 5. Upload to sim (inline — reuses bridge & ack machinery) ──
-            files = sorted(
-                p for p in glob.glob(os.path.join(out_dir, "*"))
-                if os.path.isfile(p) and not os.path.basename(p).startswith(".")
-            )
-            total = sum(os.path.getsize(p) for p in files)
-            self._send({"cmd": "char_begin", "name": name, "total": total})
-            a = self._wait_ack("char_begin", 10)
             if a is None:
-                self._set_pdx("char_begin timed out — is sim running?"); return
+                set_status("char_begin timed out — is sim running?"); return
             if not a.get("ok"):
-                self._set_pdx(f"char_begin rejected: {a.get('error', a)}"); return
+                set_status(f"char_begin rejected: {a.get('error', a)}"); return
 
             sent = 0
             for path in files:
@@ -639,32 +604,180 @@ class App(tk.Tk):
                 data = open(path, "rb").read()
                 self._send({"cmd": "file", "path": fn, "size": len(data)})
                 if not (self._wait_ack("file", 5) or {}).get("ok"):
-                    self._set_pdx(f"file open failed: {fn}"); return
+                    set_status(f"file open failed: {fn}"); return
                 for i in range(0, len(data), CHUNK_BYTES):
                     chunk = data[i:i + CHUNK_BYTES]
                     self._send({"cmd": "chunk", "d": base64.b64encode(chunk).decode()})
                     if not (self._wait_ack("chunk", 5) or {}).get("ok"):
-                        self._set_pdx(f"chunk failed: {fn}+{i}"); return
+                        set_status(f"chunk failed: {fn}+{i}"); return
                     sent += len(chunk)
-                    self._set_pdx(f"Uploading {fn}…", 72 + sent / total * 26)
+                    set_status(f"uploading {fn}…", sent * 100.0 / total)
                 self._send({"cmd": "file_end"})
                 if not (self._wait_ack("file_end", 10) or {}).get("ok"):
-                    self._set_pdx(f"file_end failed: {fn}"); return
+                    set_status(f"file_end failed: {fn}"); return
 
             self._send({"cmd": "char_end"})
             ok = (self._wait_ack("char_end", 15) or {}).get("ok")
-            self._set_pdx("Done! Character active." if ok else "char_end failed", 100)
-            # Auto-switch to GIF mode so the new character shows immediately
+            set_status("done." if ok else "char_end failed", 100)
             if ok:
                 self._send({"cmd": "species", "idx": 255})
+        except Exception as exc:
+            set_status(f"error: {exc}")
+        finally:
+            on_done()
 
+    # ─── My Characters list ───────────────────────────────────────────────────
+
+    def _refresh_chars(self):
+        for item in self.char_tree.get_children():
+            self.char_tree.delete(item)
+        if not os.path.isdir(CHARS_DIR):
+            return
+        for name in sorted(os.listdir(CHARS_DIR)):
+            d = os.path.join(CHARS_DIR, name)
+            m = os.path.join(d, "manifest.json")
+            if not os.path.isdir(d) or not os.path.isfile(m):
+                continue
+            files = [f for f in os.listdir(d) if not f.startswith(".")]
+            size  = sum(os.path.getsize(os.path.join(d, f))
+                        for f in files if os.path.isfile(os.path.join(d, f)))
+            self.char_tree.insert("", "end", iid=d, values=(
+                name, len(files), f"{size//1024} KB"))
+
+    def _selected_char_dir(self):
+        sel = self.char_tree.selection()
+        if not sel:
+            self._qlog("sys", "Select a character first.")
+            return None
+        return sel[0]   # iid == absolute path
+
+    def _char_upload_sim(self):
+        d = self._selected_char_dir()
+        if not d:
+            return
+        name = os.path.basename(d)
+        self._char_action_progress.start(10)
+        def done():
+            self._inq.put(("log", ("sys", f"[sim upload] {name} done")))
+            self._char_action_progress.stop()
+        threading.Thread(
+            target=self._upload_to_sim,
+            args=(d, name, lambda t, p=None: self._qlog("sys", f"[sim] {t}"), done),
+            daemon=True).start()
+
+    def _char_flash_usb(self):
+        d = self._selected_char_dir()
+        if not d:
+            return
+        script = os.path.join(TOOLS_DIR, "flash_character.py")
+        self._run_subprocess([sys.executable, "-u", script, d],
+                             label="[usb flash]",
+                             progress=self._char_action_progress)
+
+    def _char_upload_ble(self):
+        d = self._selected_char_dir()
+        if not d:
+            return
+        script = os.path.join(TOOLS_DIR, "ble_driver.py")
+        self._run_subprocess([sys.executable, "-u", script, d],
+                             label="[ble upload]",
+                             progress=self._char_action_progress)
+
+    def _run_subprocess(self, cmd, label, progress):
+        """Run a command in a background thread, streaming stdout to the log."""
+        progress.start(10)
+        def worker():
+            try:
+                proc = subprocess.Popen(
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, bufsize=1)
+                for line in proc.stdout:
+                    self._qlog("sys", f"{label} {line.rstrip()}")
+                proc.wait()
+                self._qlog("sys", f"{label} exit {proc.returncode}")
+            except Exception as exc:
+                self._qlog("sys", f"{label} error: {exc}")
+            finally:
+                self._inq.put(("log", ("sys", "")))   # flush
+                progress.stop()
+        threading.Thread(target=worker, daemon=True).start()
+
+    # ─── Petdex import ────────────────────────────────────────────────────────
+
+    def _set_pdx(self, txt, pct=None):
+        self._inq.put(("pdx", (txt, pct)))
+
+    def _start_petdex_import(self):
+        url = self.petdex_url.get().strip()
+        if not url:
+            return
+        self.petdex_btn.configure(state="disabled")
+        threading.Thread(target=self._petdex_worker,
+                         args=(url, self.petdex_pixel_art.get()),
+                         daemon=True).start()
+
+    def _petdex_worker(self, url_or_name, pixel_art=False):
+        STATES = ["sleep", "idle", "busy", "attention", "celebrate", "dizzy", "heart"]
+        try:
+            name    = re.split(r"[/?#]", url_or_name.rstrip("/"))[-1] or url_or_name
+            out_dir = os.path.join(CHARS_DIR, name)
+            manifest = os.path.join(out_dir, "manifest.json")
+
+            if os.path.isfile(manifest):
+                self._set_pdx(f"{name} already converted — uploading…", 72)
+                self._qlog("sys", f"[petdex] '{name}' found, skipping download")
+            else:
+                self._set_pdx(f"Downloading {name}…", 2)
+                r = subprocess.run(
+                    ["sh", "-c", f"curl -sSf 'https://petdex.crafter.run/install/{name}' | sh"],
+                    capture_output=True, text=True)
+                if r.returncode != 0:
+                    self._set_pdx(f"Download failed: {r.stderr.strip()[:50]}")
+                    self._qlog("sys", f"[petdex] error: {r.stderr.strip()}")
+                    return
+                sheet = os.path.expanduser(f"~/.codex/pets/{name}/spritesheet.webp")
+                if not os.path.exists(sheet):
+                    self._set_pdx("spritesheet not found after install"); return
+                self._set_pdx("Converting…", 18)
+                script = os.path.join(TOOLS_DIR, "petdex_convert.py")
+                cmd = [sys.executable, "-u", script, sheet,
+                       "--name", name, "--out", out_dir]
+                if pixel_art:
+                    cmd.append("--pixel-art")
+                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                        stderr=subprocess.STDOUT, text=True, bufsize=1)
+                done = 0
+                for line in proc.stdout:
+                    line = line.rstrip()
+                    if not line:
+                        continue
+                    self._qlog("sys", f"[convert] {line}")
+                    for s in STATES:
+                        if f"{s}.gif" in line:
+                            done += 1
+                            self._set_pdx(f"Converting {s} ({done}/{len(STATES)})…",
+                                          20 + done / len(STATES) * 50)
+                proc.wait()
+                if proc.returncode != 0:
+                    self._set_pdx("Conversion failed — see log"); return
+
+            self._set_pdx("Waiting for sim…", 72)
+            if not self.bridge.wait_connected(timeout=15):
+                self._set_pdx("Sim not connected"); return
+            self._set_pdx("Uploading…", 73)
+            self._upload_to_sim(
+                out_dir, name,
+                lambda t, p=None: self._set_pdx(t, p),
+                lambda: None)
+            self._refresh_chars()
         except Exception as exc:
             self._set_pdx(f"Error: {exc}")
             self._qlog("sys", f"[petdex] exception: {exc}")
         finally:
             self.petdex_btn.configure(state="normal")
 
-    # ─── Strip import ───
+    # ─── Strip import ─────────────────────────────────────────────────────────
+
     def _set_strip(self, txt, pct=None):
         self._inq.put(("strip", (txt, pct)))
 
@@ -684,18 +797,11 @@ class App(tk.Tk):
             return
         for cb in self.strip_state_combos.values():
             cb["values"] = pngs
-        # Auto-guess: find first filename containing a hint keyword for each state.
         for s, hints in self._strip_hints.items():
-            found = None
-            for hint in hints:
-                for fn in pngs:
-                    if hint in fn.lower():
-                        found = fn
-                        break
-                if found:
-                    break
+            found = next(
+                (fn for hint in hints for fn in pngs if hint in fn.lower()),
+                None)
             self.strip_state_vars[s].set(found or pngs[0])
-        # States with no hint match fall back to the idle guess.
         idle_guess = self.strip_state_vars["idle"].get()
         for s in self.strip_state_vars:
             if self.strip_state_vars[s].get() == "—":
@@ -706,31 +812,28 @@ class App(tk.Tk):
         if not src_dir:
             return
         STATES = ["sleep", "idle", "busy", "attention", "celebrate", "dizzy", "heart"]
-        mapping = {s: self.strip_state_vars[s].get()
-                   for s in STATES if self.strip_state_vars[s].get() not in ("—", "")}
-        name     = self.strip_name.get().strip() or "character"
-        bg       = self.strip_bg.get().strip()   or "000000"
+        mapping   = {s: self.strip_state_vars[s].get()
+                     for s in STATES if self.strip_state_vars[s].get() not in ("—", "")}
+        name      = self.strip_name.get().strip() or "character"
+        bg        = self.strip_bg.get().strip()   or "000000"
         pixel_art = self.strip_pixel_art.get()
         self.strip_btn.configure(state="disabled")
-        threading.Thread(
-            target=self._strip_worker,
-            args=(src_dir, name, bg, mapping, pixel_art),
-            daemon=True,
-        ).start()
+        threading.Thread(target=self._strip_worker,
+                         args=(src_dir, name, bg, mapping, pixel_art),
+                         daemon=True).start()
 
     def _strip_worker(self, src_dir, name, bg, mapping, pixel_art):
         STATES = ["sleep", "idle", "busy", "attention", "celebrate", "dizzy", "heart"]
         try:
-            repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            out_dir   = os.path.join(repo_root, "characters", name)
-            manifest  = os.path.join(out_dir, "manifest.json")
+            out_dir  = os.path.join(CHARS_DIR, name)
+            manifest = os.path.join(out_dir, "manifest.json")
 
             if os.path.isfile(manifest):
                 self._set_strip(f"{name} already converted — uploading…", 72)
-                self._qlog("sys", f"[strip] '{name}' found at {out_dir}, skipping conversion")
+                self._qlog("sys", f"[strip] '{name}' found, skipping conversion")
             else:
                 self._set_strip(f"Converting {name}…", 5)
-                script = os.path.join(repo_root, "tools", "strip_convert.py")
+                script = os.path.join(TOOLS_DIR, "strip_convert.py")
                 cmd = [sys.executable, "-u", script, src_dir,
                        "--name", name, "--bg", bg, "--out", out_dir]
                 for s, fn in mapping.items():
@@ -738,10 +841,8 @@ class App(tk.Tk):
                 if pixel_art:
                     cmd.append("--pixel-art")
                 self._qlog("sys", f"[strip] {' '.join(cmd)}")
-                proc = subprocess.Popen(
-                    cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    text=True, bufsize=1,
-                )
+                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                        stderr=subprocess.STDOUT, text=True, bufsize=1)
                 done = 0
                 for line in proc.stdout:
                     line = line.rstrip()
@@ -755,66 +856,69 @@ class App(tk.Tk):
                                             5 + done / len(STATES) * 65)
                 proc.wait()
                 if proc.returncode != 0:
-                    self._set_strip("Conversion failed — see log")
-                    return
+                    self._set_strip("Conversion failed — see log"); return
 
-            # Upload (same protocol as _petdex_worker)
-            self._set_strip("Waiting for sim connection…", 72)
+            self._set_strip("Waiting for sim…", 72)
             if not self.bridge.wait_connected(timeout=15):
-                self._set_strip("Sim not connected — is buddy-sim running?")
-                return
+                self._set_strip("Sim not connected"); return
             self._set_strip("Uploading…", 73)
-
-            files = sorted(
-                p for p in glob.glob(os.path.join(out_dir, "*"))
-                if os.path.isfile(p) and not os.path.basename(p).startswith(".")
-            )
-            total = sum(os.path.getsize(p) for p in files)
-            self._send({"cmd": "char_begin", "name": name, "total": total})
-            a = self._wait_ack("char_begin", 10)
-            if a is None:
-                self._set_strip("char_begin timed out — is sim running?"); return
-            if not a.get("ok"):
-                self._set_strip(f"char_begin rejected: {a.get('error', a)}"); return
-
-            sent = 0
-            for path in files:
-                fn   = os.path.basename(path)
-                data = open(path, "rb").read()
-                self._send({"cmd": "file", "path": fn, "size": len(data)})
-                if not (self._wait_ack("file", 5) or {}).get("ok"):
-                    self._set_strip(f"file open failed: {fn}"); return
-                for i in range(0, len(data), CHUNK_BYTES):
-                    chunk = data[i:i + CHUNK_BYTES]
-                    self._send({"cmd": "chunk", "d": base64.b64encode(chunk).decode()})
-                    if not (self._wait_ack("chunk", 5) or {}).get("ok"):
-                        self._set_strip(f"chunk failed: {fn}+{i}"); return
-                    sent += len(chunk)
-                    self._set_strip(f"Uploading {fn}…", 73 + sent / total * 25)
-                self._send({"cmd": "file_end"})
-                if not (self._wait_ack("file_end", 10) or {}).get("ok"):
-                    self._set_strip(f"file_end failed: {fn}"); return
-
-            self._send({"cmd": "char_end"})
-            ok = (self._wait_ack("char_end", 15) or {}).get("ok")
-            self._set_strip("Done! Character active." if ok else "char_end failed", 100)
-            if ok:
-                self._send({"cmd": "species", "idx": 255})
-
+            self._upload_to_sim(
+                out_dir, name,
+                lambda t, p=None: self._set_strip(t, p),
+                lambda: None)
+            self._refresh_chars()
         except Exception as exc:
             self._set_strip(f"Error: {exc}")
             self._qlog("sys", f"[strip] exception: {exc}")
         finally:
             self.strip_btn.configure(state="normal")
 
-    def _send_time(self):
-        now = int(time.time())
-        # Local TZ offset in seconds.
-        tz = -time.timezone if time.daylight == 0 else -time.altzone
-        self._send({"time": [now, tz]})
+    # ─── Firmware flash ───────────────────────────────────────────────────────
 
-    # ─── log ───
+    def _flash_firmware(self):
+        self._pio_run("-t", "upload")
+
+    def _flash_filesystem(self):
+        self._pio_run("-t", "uploadfs")
+
+    def _pio_run(self, *extra_args):
+        env = self.fw_env.get()
+        if not env:
+            return
+        self.fw_btn.configure(state="disabled")
+        self.fs_btn.configure(state="disabled")
+        self._inq.put(("fw", (f"Flashing {env}…", True)))
+        cmd = ["pio", "run", "-e", env] + list(extra_args)
+
+        def worker():
+            try:
+                proc = subprocess.Popen(
+                    cmd, cwd=REPO_ROOT,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, bufsize=1)
+                for line in proc.stdout:
+                    self._qlog("sys", f"[pio] {line.rstrip()}")
+                proc.wait()
+                msg = "Done." if proc.returncode == 0 else f"Failed (exit {proc.returncode})"
+                self._inq.put(("fw", (msg, False)))
+                self._qlog("sys", f"[pio] {msg}")
+            except FileNotFoundError:
+                self._inq.put(("fw", ("pio not found — install PlatformIO Core", False)))
+                self._qlog("sys", "[pio] not found — pip install platformio")
+            except Exception as exc:
+                self._inq.put(("fw", (f"Error: {exc}", False)))
+            finally:
+                self._inq.put(("log", ("sys", "")))
+                self.fw_btn.configure(state="normal")
+                self.fs_btn.configure(state="normal")
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    # ─── log ─────────────────────────────────────────────────────────────────
+
     def _log(self, kind, line):
+        if not line:
+            return
         prefix = {"tx": "→ ", "rx": "← ", "sys": "  "}[kind]
         self.log.insert("end", prefix + line + "\n", kind)
         self.log.see("end")
