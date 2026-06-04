@@ -138,6 +138,7 @@ class App(tk.Tk):
         self._ack_lock   = threading.Lock()
         self._sim_upload_lock = threading.Lock()   # only one upload to sim at a time
         self._upload_thread = None
+        self._celebrate_timer = None
         self._build_ui()
         self.after(50, self._drain)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -569,36 +570,41 @@ class App(tk.Tk):
             "msg": self.msg.get(), "entries": entries,
         })
 
+    def _cancel_celebrate(self):
+        if self._celebrate_timer is not None:
+            self.after_cancel(self._celebrate_timer)
+            self._celebrate_timer = None
+
     def _preset_idle(self):
+        self._cancel_celebrate()
         self.total.set(1); self.running.set(0); self.waiting.set(0)
         self._send_live()
 
     def _preset_busy(self):
+        self._cancel_celebrate()
         self.total.set(1); self.running.set(3); self.waiting.set(0)
         self._send_live()
 
     def _preset_attention(self):
+        self._cancel_celebrate()
         self.total.set(1); self.running.set(0); self.waiting.set(1)
         self._send_live()
 
     def _preset_celebrate(self):
         # Celebrate is triggered by the "completed" flag in the live payload,
-        # not a cmd. Send it true, then clear it after 3 s so it doesn't stick.
+        # not a cmd. Cancel any pending clear, send completed:true, schedule clear.
+        self._cancel_celebrate()
+        self.total.set(1); self.running.set(0); self.waiting.set(0)
         self._send({
-            "total": self.total.get(), "running": self.running.get(),
-            "waiting": self.waiting.get(), "tokens": self.tokens.get(),
-            "tokens_today": self.tokens_today.get(),
+            "total": 1, "running": 0, "waiting": 0,
+            "tokens": self.tokens.get(), "tokens_today": self.tokens_today.get(),
             "msg": self.msg.get(), "completed": True,
         })
-        self.after(3000, self._clear_completed)
+        self._celebrate_timer = self.after(3000, self._clear_completed)
 
     def _clear_completed(self):
-        self._send({
-            "total": self.total.get(), "running": self.running.get(),
-            "waiting": self.waiting.get(), "tokens": self.tokens.get(),
-            "tokens_today": self.tokens_today.get(),
-            "msg": self.msg.get(), "completed": False,
-        })
+        self._celebrate_timer = None
+        self._send_live()
 
     def _send_prompt(self):
         pid = "p_%d" % int(time.time() * 1000)
