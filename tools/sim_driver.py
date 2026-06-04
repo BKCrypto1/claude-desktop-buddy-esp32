@@ -47,7 +47,7 @@ SPECIES_NAMES = [
     "cat", "dragon", "octopus", "owl",
     "penguin", "turtle", "snail", "ghost",
     "axolotl", "cactus", "robot", "rabbit",
-    "mushroom", "chonk",
+    "mushroom", "chonk", "dog",
 ]
 
 
