@@ -39,9 +39,13 @@ SPECIES_NAMES = [
     "mushroom", "chonk", "dog",
 ]
 
-REPO_ROOT  = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-CHARS_DIR  = os.path.join(REPO_ROOT, "characters")
-TOOLS_DIR  = os.path.join(REPO_ROOT, "tools")
+REPO_ROOT     = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CHARS_DIR     = os.path.join(REPO_ROOT, "characters")
+TOOLS_DIR     = os.path.join(REPO_ROOT, "tools")
+TARGET_FILE   = os.path.expanduser("~/.buddy_target")
+STATE_FILE    = os.path.expanduser("~/.buddy_state")
+KEEPALIVE_PID = os.path.expanduser("~/.buddy_keepalive.pid")
+KEEPALIVE_PY  = os.path.join(TOOLS_DIR, "buddy_keepalive.py")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -49,13 +53,14 @@ TOOLS_DIR  = os.path.join(REPO_ROOT, "tools")
 # ─────────────────────────────────────────────────────────────────────────────
 
 class Bridge:
-    """Background TCP socket; reconnects until cancelled."""
+    """Background TCP socket; reconnects until cancelled. Can be paused."""
 
     def __init__(self, on_line, on_state):
         self._on_line  = on_line
         self._on_state = on_state
         self._sock      = None
         self._stop      = threading.Event()
+        self._pause     = threading.Event()   # set = paused, clear = active
         self._connected = threading.Event()
         self._tx        = queue.Queue()
         threading.Thread(target=self._run, daemon=True).start()
@@ -68,6 +73,20 @@ class Bridge:
         self._tx.put(line.encode())
         return line.strip()
 
+    def pause(self):
+        """Stop trying to connect (e.g. when keepalive owns the slot)."""
+        self._pause.set()
+        self._connected.clear()
+        try:
+            if self._sock:
+                self._sock.close()
+        except Exception:
+            pass
+
+    def resume(self):
+        """Resume connecting."""
+        self._pause.clear()
+
     def stop(self):
         self._stop.set()
         try:
@@ -78,6 +97,9 @@ class Bridge:
 
     def _run(self):
         while not self._stop.is_set():
+            if self._pause.is_set():
+                time.sleep(0.5)
+                continue
             try:
                 self._sock = socket.create_connection((HOST, PORT), timeout=1.5)
                 self._sock.settimeout(0.1)
@@ -140,6 +162,9 @@ class App(tk.Tk):
         self._upload_thread = None
         self._celebrate_timer = None
         self._build_ui()
+        # Pause bridge immediately if target isn't sim
+        if self._read_hook_target() != "sim":
+            self.bridge.pause()
         self.after(50, self._drain)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -151,11 +176,26 @@ class App(tk.Tk):
         # ── status bar (always visible, above tabs) ──
         bar = ttk.Frame(self)
         bar.pack(fill="x", **pad)
-        ttk.Label(bar, text="Sim:").pack(side="left")
+
+        # Connection label — prefix changes with target
+        self._conn_label = ttk.Label(bar, text="Connection:")
+        self._conn_label.pack(side="left")
         self.sim_status = tk.StringVar(value="disconnected")
         self._sim_status_label = ttk.Label(bar, textvariable=self.sim_status,
                                            foreground="red")
         self._sim_status_label.pack(side="left", padx=4)
+
+        # ── Target toggle ──
+        ttk.Separator(bar, orient="vertical").pack(side="left", fill="y", padx=10)
+        ttk.Label(bar, text="Target:", foreground="#888").pack(side="left")
+        self._hook_target = tk.StringVar(value=self._read_hook_target())
+        for tgt, label in [("desktop", "Desktop"), ("sim", "Sim"), ("hardware", "Hardware"), ("off", "Off")]:
+            rb = ttk.Radiobutton(
+                bar, text=label, variable=self._hook_target, value=tgt,
+                command=self._on_hook_target_change,
+            )
+            rb.pack(side="left", padx=4)
+        self.after(2000, self._poll_keepalive)
 
         # ── notebook ──
         nb = ttk.Notebook(self)
@@ -493,6 +533,112 @@ class App(tk.Tk):
             ttk.Label(guide, text=env, foreground="#555",
                       font=("Menlo", 10)).grid(row=r, column=1, sticky="w", **pad)
 
+    # ─── hook target helpers ──────────────────────────────────────────────────
+
+    def _read_hook_target(self) -> str:
+        try:
+            with open(TARGET_FILE) as f:
+                return f.read().strip().lower()
+        except FileNotFoundError:
+            return "sim"
+
+    def _on_hook_target_change(self):
+        tgt = self._hook_target.get()
+        try:
+            with open(TARGET_FILE, "w") as f:
+                f.write(tgt)
+        except OSError as e:
+            self._log("sys", f"[hook] could not write target: {e}")
+            return
+
+        if tgt == "desktop":
+            self.bridge.pause()        # keepalive owns the TCP slot
+            self._start_keepalive()
+            self.sim_status.set("disconnected")
+        elif tgt == "hardware":
+            self.bridge.pause()
+            self._stop_keepalive()
+            self.sim_status.set("not paired")
+        elif tgt == "off":
+            self.bridge.pause()
+            self._stop_keepalive()
+            self.sim_status.set("off")
+        else:  # sim
+            self._stop_keepalive()
+            self.bridge.resume()       # sim_driver owns the TCP slot
+            self.sim_status.set("disconnected")
+
+        self._refresh_status()
+        self._log("sys", f"[hook] target → {tgt}")
+
+    def _keepalive_running(self) -> bool:
+        try:
+            with open(KEEPALIVE_PID) as f:
+                pid = int(f.read().strip())
+            os.kill(pid, 0)
+            return True
+        except (FileNotFoundError, ValueError, OSError, ProcessLookupError):
+            return False
+
+    def _start_keepalive(self):
+        if self._keepalive_running():
+            return
+        proc = subprocess.Popen(
+            [sys.executable, KEEPALIVE_PY],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        try:
+            with open(KEEPALIVE_PID, "w") as f:
+                f.write(str(proc.pid))
+        except OSError:
+            pass
+        self._log("sys", f"[hook] keepalive started (pid {proc.pid})")
+
+    def _stop_keepalive(self):
+        try:
+            with open(KEEPALIVE_PID) as f:
+                pid = int(f.read().strip())
+            os.kill(pid, 15)  # SIGTERM
+            os.remove(KEEPALIVE_PID)
+            self._log("sys", f"[hook] keepalive stopped (pid {pid})")
+        except (FileNotFoundError, ValueError, OSError, ProcessLookupError):
+            pass
+
+    def _refresh_status(self):
+        """Update the connection label and status for the current target."""
+        tgt = self._hook_target.get()
+
+        if tgt == "desktop":
+            alive = self._keepalive_running()
+            self._conn_label.config(text="Desktop:")
+            self.sim_status.set("connected" if alive else "disconnected")
+            self._sim_status_label.config(foreground="green" if alive else "red")
+
+        elif tgt == "sim":
+            connected = self.sim_status.get() == "connected"
+            self._conn_label.config(text="Sim:")
+            self._sim_status_label.config(foreground="green" if connected else "red")
+
+        elif tgt == "hardware":
+            self._conn_label.config(text="Hardware:")
+            self.sim_status.set("not paired")
+            self._sim_status_label.config(foreground="#888")
+
+        else:  # off
+            self._conn_label.config(text="Connection:")
+            self.sim_status.set("off")
+            self._sim_status_label.config(foreground="#888")
+
+    def _poll_keepalive(self):
+        """Poll connection status every 2 seconds."""
+        tgt = self._hook_target.get()
+        if tgt == "desktop" and not self._keepalive_running():
+            self._start_keepalive()
+        self._refresh_status()
+        self.after(2000, self._poll_keepalive)
+
     # ─── socket → UI ─────────────────────────────────────────────────────────
 
     def _enqueue_line(self, s):
@@ -522,6 +668,7 @@ class App(tk.Tk):
 
     def _enqueue_state(self, connected):
         self._inq.put(("state", connected))
+        self.after(0, self._refresh_status)
 
     def _drain(self):
         try:
@@ -535,6 +682,7 @@ class App(tk.Tk):
                     self.sim_status.set("connected" if payload else "disconnected")
                     self._sim_status_label.configure(
                         foreground="green" if payload else "red")
+                    self._refresh_status()
                 elif kind == "pdx":
                     txt, pct = payload
                     self.petdex_status.set(txt)
