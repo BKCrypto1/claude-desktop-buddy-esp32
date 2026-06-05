@@ -167,11 +167,26 @@ def main():
 
     if et == "pretooluse":
         entries = push_entry(entries, tool_name)
+        # Extract a human-readable hint from tool_input for the approval prompt
+        tool_input = payload.get("tool_input", {}) or {}
+        if isinstance(tool_input, dict):
+            # Bash: show the command; others: show key=value pairs
+            if "command" in tool_input:
+                hint = tool_input["command"][:43]
+            elif "file_path" in tool_input:
+                hint = os.path.basename(tool_input.get("file_path", ""))[:43]
+            else:
+                pairs = ", ".join(f"{k}={v}" for k, v in list(tool_input.items())[:2])
+                hint = pairs[:43]
+        else:
+            hint = str(tool_input)[:43]
+
         write_state({
             "state":        "busy",
             "tokens":       tokens_today,
             "tokens_today": tokens_today,
             "tool":         tool_name,
+            "hint":         hint,
             "entries":      entries,
         })
 
@@ -194,15 +209,18 @@ def main():
         })
 
     elif et == "notification":
-        # Build a prompt object for buddy to display
-        message  = payload.get("message", "")
-        pid      = "desk_%d" % int(time.time() * 1000)
-        hint     = message[:43] if message else tool_name
+        # Use hint already stored from the PreToolUse (actual command/path)
+        # Fall back to notification message if no prior hint
+        prior_hint = current.get("hint", "")
+        prior_tool = current.get("tool", "") or tool_name
+        message    = payload.get("message", "")
+        hint       = prior_hint or message[:43] or prior_tool
+        pid        = "desk_%d" % int(time.time() * 1000)
         write_state({
             "state":        "attention",
             "tokens":       tokens_today,
             "tokens_today": tokens_today,
-            "tool":         tool_name,
+            "tool":         prior_tool,
             "hint":         hint,
             "prompt_id":    pid,
             "entries":      entries,

@@ -82,7 +82,8 @@ def build_payload(s: dict) -> dict:
             base["prompt"] = {"id": prompt_id, "tool": tool, "hint": hint}
 
     elif state == "celebrate":
-        base.update({"running": 0, "waiting": 0, "msg": "", "completed": True})
+        base.update({"running": 0, "waiting": 0, "msg": "", "completed": True,
+                     "approved_add": 1})
 
     elif state.startswith("oneshot:"):
         # Oneshot bypasses the normal payload
@@ -101,7 +102,8 @@ def send_line(sock, obj: dict):
 
 def run_sim():
     print(f"[buddy_keepalive] connecting to sim {SIM_HOST}:{SIM_PORT}")
-    celebrate_until = 0.0
+    celebrate_until  = 0.0
+    approved_sent    = False   # track whether we already sent approved_add this celebrate
 
     while True:
         try:
@@ -127,10 +129,12 @@ def run_sim():
                         if celebrate_until == 0.0:
                             celebrate_until = now + 3.0
                     else:
-                        celebrate_until = 0.0
+                        celebrate_until  = 0.0
+                        approved_sent    = False
 
                     if celebrate_until > 0.0 and now > celebrate_until:
                         celebrate_until = 0.0
+                        approved_sent   = False
                         clear_field("state", "idle")
                         state_obj["state"] = "idle"
                         state = "idle"
@@ -141,6 +145,11 @@ def run_sim():
                         clear_field("state", "idle")
                     else:
                         payload = build_payload(state_obj)
+                        # Only send approved_add on the first celebrate tick
+                        if state == "celebrate" and approved_sent:
+                            payload.pop("approved_add", None)
+                        elif state == "celebrate" and not approved_sent:
+                            approved_sent = True
 
                     send_line(s, payload)
                     time.sleep(TICK_S)

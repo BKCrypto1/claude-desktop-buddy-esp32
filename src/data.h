@@ -114,6 +114,15 @@ static void _applyJson(const char* line, TamaState* out) {
   uint32_t bridgeTokens = doc["tokens"] | 0;
   if (doc["tokens"].is<uint32_t>()) statsOnBridgeTokens(bridgeTokens);
   out->tokensToday = doc["tokens_today"] | out->tokensToday;
+  // Desktop-mode approval signals: send {"approved_add":1} or {"denied_add":1}
+  if (doc["approved_add"].is<uint32_t>()) {
+    uint32_t n = doc["approved_add"].as<uint32_t>();
+    for (uint32_t i = 0; i < n; i++) statsOnApproval(1);
+  }
+  if (doc["denied_add"].is<uint32_t>()) {
+    uint32_t n = doc["denied_add"].as<uint32_t>();
+    for (uint32_t i = 0; i < n; i++) statsOnDenial();
+  }
   const char* m = doc["msg"];
   if (m) {
     strncpy(out->msg, m, sizeof(out->msg)-1); out->msg[sizeof(out->msg)-1]=0;
