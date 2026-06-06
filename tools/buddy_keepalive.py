@@ -3,7 +3,7 @@
 buddy_keepalive.py — Persistent Buddy sim connection manager.
 
 Holds the single TCP connection to the simulator and pushes the current
-state every 2 seconds. State is driven by buddy_hook.py via ~/.buddy_state.
+state every 0.5 seconds. State is driven by buddy_hook.py via ~/.buddy_state.
 
 Also drains any queued commands (state["cmds"]) immediately on each tick.
 
@@ -23,6 +23,7 @@ STATE_FILE  = os.path.expanduser("~/.buddy_state")
 SIM_HOST    = "127.0.0.1"
 SIM_PORT    = 31415
 TICK_S      = 0.5
+TIME_SYNC_INTERVAL = 3600   # re-sync time every hour
 
 
 def get_target() -> str:
@@ -40,7 +41,8 @@ def read_state() -> dict:
     except (FileNotFoundError, json.JSONDecodeError, ValueError):
         return {
             "state": "idle", "tokens": 0, "tokens_today": 0,
-            "tool": "", "hint": "", "prompt_id": "",
+            "tool": "", "hint": "", "prompt_id": "", "decision": "",
+            "approved": False, "denied_add": 0, "send_approved_add": False,
             "entries": [], "cmds": [],
         }
 
@@ -50,6 +52,17 @@ def clear_field(key: str, value):
     try:
         current = read_state()
         current[key] = value
+        with open(STATE_FILE, "w") as f:
+            f.write(json.dumps(current))
+    except OSError:
+        pass
+
+
+def clear_fields(updates: dict):
+    """Atomically update multiple fields in the state file."""
+    try:
+        current = read_state()
+        current.update(updates)
         with open(STATE_FILE, "w") as f:
             f.write(json.dumps(current))
     except OSError:
@@ -74,7 +87,7 @@ def build_payload(s: dict) -> dict:
     }
 
     if state == "busy":
-        base.update({"running": 3, "waiting": 0, "msg": tool})
+        base.update({"running": 1, "waiting": 0, "msg": tool})
 
     elif state == "attention":
         base.update({"running": 0, "waiting": 1, "msg": ""})
@@ -82,11 +95,12 @@ def build_payload(s: dict) -> dict:
             base["prompt"] = {"id": prompt_id, "tool": tool, "hint": hint}
 
     elif state == "celebrate":
-        base.update({"running": 0, "waiting": 0, "msg": "", "completed": True,
-                     "approved_add": 1})
+        base.update({"running": 0, "waiting": 0, "msg": "", "completed": True})
+        # Only include approved_add if hook flagged a real buddy approval
+        if s.get("send_approved_add"):
+            base["approved_add"] = 1
 
     elif state.startswith("oneshot:"):
-        # Oneshot bypasses the normal payload
         return {"cmd": "oneshot", "state": state.split(":", 1)[1]}
 
     else:  # idle
@@ -95,13 +109,19 @@ def build_payload(s: dict) -> dict:
     return base
 
 
+def make_time_payload() -> dict:
+    now = int(time.time())
+    tz  = -time.timezone if time.daylight == 0 else -time.altzone
+    return {"time": [now, tz]}
+
+
 def send_line(sock, obj: dict):
     line = (json.dumps(obj, separators=(",", ":")) + "\n").encode()
     sock.sendall(line)
 
 
 def handle_incoming(raw: str):
-    """Process a message sent FROM the sim to us (e.g. permission decisions)."""
+    """Process a message sent FROM the sim (e.g. permission decisions)."""
     try:
         obj = json.loads(raw)
     except (json.JSONDecodeError, ValueError):
@@ -109,8 +129,6 @@ def handle_incoming(raw: str):
     cmd = obj.get("cmd")
     if cmd == "permission":
         decision = obj.get("decision", "")
-        # Map device decisions to Claude Code permission decisions
-        # "once" or "always" → allow, "deny" → deny
         perm = "allow" if decision in ("once", "always") else "deny"
         clear_field("decision", perm)
         print(f"[buddy_keepalive] permission decision: {decision} → {perm}")
@@ -127,15 +145,21 @@ def run_sim():
     print(f"[buddy_keepalive] connecting to sim {SIM_HOST}:{SIM_PORT}")
     celebrate_until  = 0.0
     approved_sent    = False
-    last_mtime       = 0.0   # track state file changes for instant sends
+    last_mtime       = 0.0
+    last_time_sync   = 0.0
 
     while True:
         try:
             with socket.create_connection((SIM_HOST, SIM_PORT), timeout=5.0) as s:
                 print("[buddy_keepalive] connected")
-                s.settimeout(0.05)   # non-blocking reads
+                s.settimeout(0.05)
                 last_send = 0.0
                 rx_buf    = ""
+
+                # Auto time sync on connect
+                send_line(s, make_time_payload())
+                last_time_sync = time.time()
+
                 while True:
                     now   = time.time()
                     mtime = state_mtime()
@@ -154,6 +178,11 @@ def run_sim():
                         pass
                     except (OSError, ConnectionResetError):
                         raise
+
+                    # Hourly time re-sync
+                    if now - last_time_sync > TIME_SYNC_INTERVAL:
+                        send_line(s, make_time_payload())
+                        last_time_sync = now
 
                     # Send immediately on state file change, otherwise every TICK_S
                     if mtime == last_mtime and (now - last_send) < TICK_S:
@@ -174,18 +203,24 @@ def run_sim():
                         state_obj = read_state()
                         state     = state_obj.get("state", "idle")
 
+                    # ── Drain pending denied_add ──────────────────────────────
+                    denied_add = state_obj.get("denied_add", 0)
+                    if denied_add > 0:
+                        send_line(s, {"denied_add": denied_add})
+                        clear_field("denied_add", 0)
+
                     # ── Celebrate auto-reverts to idle after 3 seconds ────────
                     if state == "celebrate":
                         if celebrate_until == 0.0:
                             celebrate_until = now + 3.0
                     else:
-                        celebrate_until  = 0.0
-                        approved_sent    = False
+                        celebrate_until = 0.0
+                        approved_sent   = False
 
                     if celebrate_until > 0.0 and now > celebrate_until:
                         celebrate_until = 0.0
                         approved_sent   = False
-                        clear_field("state", "idle")
+                        clear_fields({"state": "idle", "send_approved_add": False})
                         state_obj["state"] = "idle"
                         state = "idle"
 
@@ -195,11 +230,14 @@ def run_sim():
                         clear_field("state", "idle")
                     else:
                         payload = build_payload(state_obj)
-                        # Only send approved_add on the first celebrate tick
-                        if state == "celebrate" and approved_sent:
-                            payload.pop("approved_add", None)
-                        elif state == "celebrate" and not approved_sent:
-                            approved_sent = True
+                        if state == "celebrate":
+                            if approved_sent:
+                                payload.pop("approved_add", None)
+                            else:
+                                approved_sent = True
+                                # Clear the flag after sending once
+                                if state_obj.get("send_approved_add"):
+                                    clear_field("send_approved_add", False)
 
                     send_line(s, payload)
                     time.sleep(TICK_S)

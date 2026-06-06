@@ -13,7 +13,10 @@ State file format:
     "tool":         "<current tool name>",
     "hint":         "<hint text for prompt>",
     "prompt_id":    "<pending prompt id>",
-    "entries":      ["tool1", "tool2", ...],   # last 8 tool uses
+    "decision":     "allow"|"deny"|"",
+    "approved":     <bool — true if buddy approved something this session>,
+    "denied_add":   <int — pending denied count increment for keepalive to drain>,
+    "entries":      ["Bash:rm -rf", "Edit:foo.py", ...],  # last 8 with hint suffix
     "cmds":         [{"cmd": "..."}, ...]      # one-shot commands for keepalive to drain
   }
 
@@ -23,6 +26,7 @@ Usage (called automatically by Claude Code hooks):
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -33,6 +37,19 @@ KEEPALIVE_PID = os.path.expanduser("~/.buddy_keepalive.pid")
 
 TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
 KEEPALIVE = os.path.join(TOOLS_DIR, "buddy_keepalive.py")
+
+APPROVAL_TIMEOUT = 30   # seconds before auto-allow
+
+# Only these tools block for approval — everything else is informational only
+APPROVAL_GATE = {"Bash", "Agent"}
+
+# Bash commands that are read-only/safe — skip approval, auto-allow instantly
+SAFE_BASH_PREFIXES = (
+    "grep", "rg", "find", "ls", "cat", "head", "tail", "wc", "diff",
+    "sed -n", "awk", "sort", "uniq", "echo", "pwd", "which", "file",
+    "git log", "git status", "git diff", "git show", "git branch",
+    "python3 -c", "node -e", "jq",
+)
 
 
 # ── Target ────────────────────────────────────────────────────────────────────
@@ -54,7 +71,8 @@ def read_state() -> dict:
     except (FileNotFoundError, json.JSONDecodeError, ValueError):
         return {
             "state": "idle", "tokens": 0, "tokens_today": 0,
-            "tool": "", "hint": "", "prompt_id": "",
+            "tool": "", "hint": "", "prompt_id": "", "decision": "",
+            "approved": False, "denied_add": 0,
             "entries": [], "cmds": [],
         }
 
@@ -119,15 +137,36 @@ def read_session_tokens(transcript_path: str) -> int:
     return total
 
 
-# ── Entries (rolling tool list) ───────────────────────────────────────────────
+# ── Entries (rolling tool list with hint suffix) ──────────────────────────────
 
 def push_entry(entries: list, tool_name: str, hint: str = "") -> list:
-    """Add tool name to entries, keep last 8."""
-    if tool_name:
-        entries = list(entries)
-        entries.append(tool_name[:22])
-        entries = entries[-8:]
-    return entries
+    """Add 'Tool:hint' to entries, keep last 8."""
+    if not tool_name:
+        return entries
+    entries = list(entries)
+    if hint:
+        # Normalize hint: strip comments, collapse whitespace, keep first line
+        first_line = hint.split("\n")[0].strip()
+        first_line = re.sub(r"^#+\s*", "", first_line)   # strip leading # comments
+        first_line = re.sub(r"\s+", " ", first_line)
+        label = f"{tool_name}:{first_line}"[:22]
+    else:
+        label = tool_name[:22]
+    entries.append(label)
+    return entries[-8:]
+
+
+# ── Safe bash check ───────────────────────────────────────────────────────────
+
+def is_safe_bash(raw_cmd: str) -> bool:
+    """Return True if the bash command is read-only and needs no approval."""
+    # Strip comment lines and blank lines, find first real command token
+    for line in raw_cmd.splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
+            # Check against the first token / prefix of the first real line
+            return any(stripped.startswith(p) for p in SAFE_BASH_PREFIXES)
+    return True  # all lines were comments — safe
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -157,7 +196,6 @@ def main():
     transcript_path = payload.get("transcript_path", "")
     tool_name       = payload.get("tool_name", "") or payload.get("tool", "")
 
-    # Read real token count from transcript if available
     if transcript_path:
         tokens_today = read_session_tokens(transcript_path)
     else:
@@ -165,24 +203,11 @@ def main():
 
     et = event_type.lower()
 
-    # Only these tools block for approval — everything else is informational only
-    APPROVAL_GATE = {"Bash", "Agent"}
-
-    # Bash commands that are read-only/safe — skip approval screen, auto-allow instantly
-    SAFE_BASH_PREFIXES = (
-        "grep", "rg", "find", "ls", "cat", "head", "tail", "wc", "diff",
-        "sed -n", "awk", "sort", "uniq", "echo", "pwd", "which", "file",
-        "git log", "git status", "git diff", "git show", "git branch",
-        "python3 -c", "node -e", "jq",
-    )
-
     if et == "pretooluse":
-        # Extract a human-readable hint from tool_input for the approval prompt
         tool_input = payload.get("tool_input", {}) or {}
         if isinstance(tool_input, dict):
-            # Bash: show the command; others: show key=value pairs
             if "command" in tool_input:
-                hint = tool_input["command"][:43]
+                hint = tool_input["command"][:80]   # longer for safe-check accuracy
             elif "file_path" in tool_input:
                 hint = os.path.basename(tool_input.get("file_path", ""))[:43]
             else:
@@ -192,31 +217,29 @@ def main():
             hint = str(tool_input)[:43]
 
         entries = push_entry(entries, tool_name, hint)
+        hint_short = hint[:43]   # firmware limit
 
-        # For Bash: auto-allow safe read-only commands without showing approval screen
-        bash_cmd = hint  # hint already has the command text
-        is_safe_bash = (
-            tool_name == "Bash" and
-            any(bash_cmd.lstrip().startswith(p) for p in SAFE_BASH_PREFIXES)
+        needs_approval = (
+            tool_name in APPROVAL_GATE and
+            not (tool_name == "Bash" and is_safe_bash(hint))
         )
 
-        if tool_name in APPROVAL_GATE and not is_safe_bash:
+        if needs_approval:
             pid = "desk_%d" % int(time.time() * 1000)
 
-            # Show approval prompt on buddy and wait for decision
             write_state({
                 "state":        "attention",
                 "tokens":       tokens_today,
                 "tokens_today": tokens_today,
                 "tool":         tool_name,
-                "hint":         hint,
+                "hint":         hint_short,
                 "prompt_id":    pid,
                 "decision":     "",
                 "entries":      entries,
             })
 
-            # Wait for buddy decision (up to 60 s), then pass allow/deny to Claude.
-            deadline = time.time() + 60
+            # Wait for buddy decision (up to APPROVAL_TIMEOUT seconds).
+            deadline = time.time() + APPROVAL_TIMEOUT
             decision = ""
             while time.time() < deadline:
                 time.sleep(0.1)
@@ -226,58 +249,73 @@ def main():
                     break
 
             if decision == "deny":
+                # Signal denied count increment and dizzy oneshot to keepalive
+                write_state({
+                    "denied_add": current.get("denied_add", 0) + 1,
+                    "state":      "oneshot:dizzy",
+                    "prompt_id":  "",
+                })
                 print(json.dumps({"hookSpecificOutput": {"permissionDecision": "deny"}}))
+            elif decision == "allow":
+                # Mark that a real buddy approval happened this session
+                write_state({"approved": True, "prompt_id": ""})
+                print(json.dumps({"hookSpecificOutput": {"permissionDecision": "allow"}}))
             else:
+                # Timeout — signal with dizzy, default to allow
+                write_state({
+                    "state":     "oneshot:dizzy",
+                    "prompt_id": "",
+                })
                 print(json.dumps({"hookSpecificOutput": {"permissionDecision": "allow"}}))
         else:
-            # Informational only — show busy state, don't block Claude
             write_state({
                 "state":        "busy",
                 "tokens":       tokens_today,
                 "tokens_today": tokens_today,
                 "tool":         tool_name,
-                "hint":         hint,
+                "hint":         hint_short,
                 "entries":      entries,
             })
-            # For safe Bash: still return allow so Claude's own dialog never fires
+            # Return allow for Bash so Claude's own permission dialog never fires
             if tool_name == "Bash":
                 print(json.dumps({"hookSpecificOutput": {"permissionDecision": "allow"}}))
 
     elif et == "posttooluse":
-        # Clear prompt (approval was resolved), stay busy for next tool
         write_state({
             "state":        "busy",
             "tokens":       tokens_today,
             "tokens_today": tokens_today,
             "tool":         tool_name,
             "hint":         "",
-            "prompt_id":    "",   # clears approval screen on buddy
+            "prompt_id":    "",
             "entries":      entries,
         })
 
     elif et == "stop":
+        # Only send approved_add if a real buddy approval happened this session
+        was_approved = current.get("approved", False)
         write_state({
             "state":        "celebrate",
             "tokens":       tokens_today,
             "tokens_today": tokens_today,
             "entries":      entries,
+            "approved":     False,   # reset for next session
+            "send_approved_add": was_approved,
         })
 
     elif et == "notification":
-        # Use hint already stored from the PreToolUse (actual command/path)
-        # Fall back to notification message if no prior hint
-        prior_hint = current.get("hint", "")
-        prior_tool = current.get("tool", "") or tool_name
+        # Show attention animation but NO prompt_id — notifications don't block
+        # and the approval screen should never show for them.
         message    = payload.get("message", "")
-        hint       = prior_hint or message[:43] or prior_tool
-        pid        = "desk_%d" % int(time.time() * 1000)
+        prior_tool = current.get("tool", "") or tool_name or "Claude"
+        hint       = message[:43] or prior_tool
         write_state({
             "state":        "attention",
             "tokens":       tokens_today,
             "tokens_today": tokens_today,
             "tool":         prior_tool,
             "hint":         hint,
-            "prompt_id":    pid,
+            "prompt_id":    "",   # no approval screen for notifications
             "entries":      entries,
         })
 
