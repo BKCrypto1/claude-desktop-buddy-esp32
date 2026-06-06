@@ -202,9 +202,9 @@ Any key press or screen tap wakes the panel.
 | `sleep`     | time-of-day 22:00–7:00 (idle); clock face ambient   | eyes closed, slow breathing   |
 | `idle`      | connected, nothing running                           | blinking, looking around      |
 | `busy`      | tool running / sessions active                       | sweating, working             |
-| `attention` | approval pending (Bash/Agent gate)                   | alert, **red top-bar pulses** |
+| `attention` | approval pending (Bash/Agent gate); notification     | alert, **red top-bar pulses** |
 | `celebrate` | level up (every 50K tokens); slow approval (≥ 5 s)  | confetti, bouncing            |
-| `dizzy`     | shake device; denial via buddy                       | spiral eyes, wobbling         |
+| `dizzy`     | shake device; denial or approval timeout via buddy   | spiral eyes, wobbling         |
 | `heart`     | fast approval (< 5 s); tap buddy on home screen      | floating hearts               |
 
 Nineteen ASCII species, each with all seven animations. **Settings →
@@ -371,18 +371,22 @@ instantly on change).
 
 | Hook event | Buddy state | Notes |
 | --- | --- | --- |
-| PreToolUse (safe read-only) | busy | grep, cat, git log, etc. — auto-approved |
-| PreToolUse (Bash / Agent) | attention | Blocks Claude up to 60 s for your decision |
-| PostToolUse | busy → idle | Clears approval screen |
-| Stop | celebrate | Claude finished responding |
-| Notification | attention | Something needs your attention |
+| PreToolUse (safe read-only) | busy | grep, cat, git log, etc. — auto-approved instantly |
+| PreToolUse (Bash / Agent) | attention | Blocks Claude up to 30 s for your decision |
+| PostToolUse | busy | Clears approval screen |
+| Stop | celebrate | Claude finished responding (approved count only increments on real buddy approval) |
+| Notification | attention | Informational only — no approval screen |
+
+**Safe bash commands (auto-approved, no buddy prompt):**
+`grep`, `rg`, `find`, `ls`, `cat`, `head`, `tail`, `wc`, `diff`, `sed -n`, `awk`, `sort`, `uniq`, `echo`, `pwd`, `which`, `file`, `git log/status/diff/show/branch`, `python3 -c`, `node -e`, `jq`
 
 **Approval flow (Desktop mode):**
 
 1. Claude wants to run a Bash command or spawn an Agent
 2. Buddy shows approval screen — tap **upper half** to approve, **lower half** to deny
-3. Buddy sends decision back; Claude proceeds or is blocked
-4. Fast approval (< 5 s) triggers a heart animation; denial triggers dizzy
+3. Approval screen shows tool name + hint. Line 2 of hint shows the **tail** of the command so the key argument/path is always visible
+4. No response in 30 s → auto-allow + **dizzy** animation signals the timeout
+5. Fast approval (< 5 s) → **heart** animation; denial → **dizzy** + denied count increments
 
 **Clock & sleep in Desktop mode:**
 
@@ -485,6 +489,16 @@ docs/superpowers/    — design specs + implementation plans
 CST92xx touch (1.75C, both 2.16 boards) and PCF85063 RTC (1.8, both
 2.16 boards) come in through `SensorLib` via `platformio.ini` lib_deps
 rather than being vendored.
+
+## Hardware reliability notes
+
+These are applied in firmware to prevent edge-case failures:
+
+- **BLE reconnect** — 200 ms delay before re-advertising after disconnect; prevents a race where a fast desktop reconnect beats NimBLE's cleanup.
+- **Token double-count on reboot** — `_lastBridgeTokens` is persisted to NVS so a device power-cycle mid-session doesn't re-credit the whole session's tokens on reconnect.
+- **Stale clock after nap** — waking from face-down nap forces an immediate RTC re-read; no stale cached time on the clock face.
+- **Velocity ring reset** — mood velocity ring is cleared on each new authenticated BLE session so old samples from a previous day don't pollute the current session's mood.
+- **BLE upload robustness** — each chunk is retried up to 3 times before aborting; upload checks device responsiveness first and warns if the device is napping.
 
 ## Availability
 
