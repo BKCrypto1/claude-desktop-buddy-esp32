@@ -1,4 +1,5 @@
 #include "ble_bridge.h"
+#include "stats.h"
 #include <NimBLEDevice.h>
 #include <Arduino.h>
 #include <string.h>
@@ -52,7 +53,9 @@ class ServerCallbacks : public NimBLEServerCallbacks {
     passkey  = 0;
     mtu      = 23;
     Serial.printf("[ble] disconnected reason=%d\n", reason);
-    // Restart advertising so the next client can find us.
+    // Brief delay lets NimBLE finish cleanup before re-advertising.
+    // Without it, a fast desktop reconnect can race the stack and fail.
+    delay(200);
     NimBLEDevice::startAdvertising();
   }
   void onMTUChange(uint16_t newMtu, NimBLEConnInfo&) override {
@@ -71,7 +74,10 @@ class ServerCallbacks : public NimBLEServerCallbacks {
     passkey = 0;
     secure  = connInfo.isEncrypted();
     Serial.printf("[ble] auth %s\n", secure ? "ok" : "FAIL");
-    if (!secure && server) server->disconnect(connInfo.getConnHandle());
+    if (!secure && server) { server->disconnect(connInfo.getConnHandle()); return; }
+    // New authenticated session — reset velocity ring so stale old samples
+    // don't carry over and skew mood for the fresh session.
+    statsOnConnect();
   }
 };
 

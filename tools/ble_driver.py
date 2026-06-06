@@ -124,6 +124,20 @@ async def pick_device(name_filter: str | None) -> str:
             pass
 
 
+CHUNK_RETRIES = 3   # retry failed chunks before aborting
+
+
+async def check_awake(buddy: BuddyBLE) -> bool:
+    """Send a status ping and warn if the device doesn't respond (likely napping)."""
+    await buddy.send({"cmd": "status"})
+    resp = await buddy.wait_ack("status", timeout=3.0)
+    if resp is None:
+        print("Warning: device did not respond to status ping.")
+        print("  If it's face-down (napping), lift it face-up and try again.")
+        return False
+    return True
+
+
 async def upload(buddy: BuddyBLE, char_dir: str) -> bool:
     manifest_path = os.path.join(char_dir, "manifest.json")
     name = json.loads(open(manifest_path).read())["name"]
@@ -134,6 +148,10 @@ async def upload(buddy: BuddyBLE, char_dir: str) -> bool:
     )
     total = sum(os.path.getsize(p) for p in files)
     print(f"Uploading '{name}'  ({total:,} bytes, {len(files)} files)")
+
+    # Check device is awake before starting
+    if not await check_awake(buddy):
+        return False
 
     await buddy.send({"cmd": "char_begin", "name": name, "total": total})
     a = await buddy.wait_ack("char_begin", timeout=10)
@@ -154,10 +172,18 @@ async def upload(buddy: BuddyBLE, char_dir: str) -> bool:
 
         for i in range(0, len(data), CHUNK_BYTES):
             chunk = data[i:i + CHUNK_BYTES]
-            await buddy.send({"cmd": "chunk", "d": base64.b64encode(chunk).decode()})
-            a = await buddy.wait_ack("chunk", timeout=5)
-            if not a or not a.get("ok"):
-                print(f"\nchunk failed: {fn}+{i}"); return False
+            encoded = base64.b64encode(chunk).decode()
+            success = False
+            for attempt in range(CHUNK_RETRIES):
+                await buddy.send({"cmd": "chunk", "d": encoded})
+                a = await buddy.wait_ack("chunk", timeout=5)
+                if a and a.get("ok"):
+                    success = True
+                    break
+                print(f"\n  chunk retry {attempt + 1}/{CHUNK_RETRIES}: {fn}+{i}")
+            if not success:
+                print(f"\nchunk failed after {CHUNK_RETRIES} attempts: {fn}+{i}")
+                return False
             sent += len(chunk)
             pct  = sent / total * 100
             bar  = "█" * int(pct / 5) + "░" * (20 - int(pct / 5))

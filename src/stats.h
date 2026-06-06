@@ -26,6 +26,10 @@ static Stats _stats;
 static Preferences _prefs;
 static bool _dirty = false;
 
+// Declared here (before statsLoad/statsSave) because both functions reference them.
+static uint32_t _lastBridgeTokens = 0;
+static bool     _tokensSynced     = false;
+
 inline void statsLoad() {
   _prefs.begin("buddy", true);
   _stats.napSeconds = _prefs.getUInt("nap", 0);
@@ -35,6 +39,8 @@ inline void statsLoad() {
   _stats.velCount   = _prefs.getUChar("vcnt", 0);
   _stats.level      = _prefs.getUChar("lvl", 0);
   _stats.tokens     = _prefs.getUInt("tok", 0);
+  _lastBridgeTokens = _prefs.getUInt("btok", 0);   // survive reboot mid-session
+  _tokensSynced     = (_lastBridgeTokens > 0);
   size_t got = _prefs.getBytes("vel", _stats.velocity, sizeof(_stats.velocity));
   if (got != sizeof(_stats.velocity)) memset(_stats.velocity, 0, sizeof(_stats.velocity));
   _prefs.end();
@@ -55,12 +61,21 @@ inline void statsSave() {
   _prefs.putUChar("vcnt", _stats.velCount);
   _prefs.putUChar("lvl", _stats.level);
   _prefs.putUInt("tok", _stats.tokens);
+  _prefs.putUInt("btok", _lastBridgeTokens);
   _prefs.putBytes("vel", _stats.velocity, sizeof(_stats.velocity));
   _prefs.end();
   _dirty = false;
 }
 
 // Level is token-driven now; approvals only feed mood/velocity.
+// Called on new authenticated BLE connection — resets velocity ring so stale
+// samples from previous sessions don't poison the mood for the new one.
+inline void statsOnConnect() {
+  memset(_stats.velocity, 0, sizeof(_stats.velocity));
+  _stats.velIdx   = 0;
+  _stats.velCount = 0;
+}
+
 inline void statsOnApproval(uint32_t secondsToRespond) {
   _stats.approvals++;
   _stats.velocity[_stats.velIdx] = (uint16_t)((secondsToRespond > 65535u) ? 65535u : secondsToRespond);
@@ -72,8 +87,6 @@ inline void statsOnApproval(uint32_t secondsToRespond) {
 // Tokens feed the pet. 50K per level, 5K per pip on the fed bar.
 // Bridge sends cumulative since its start; we add the delta. A drop means
 // the bridge restarted — resync without adding, don't lose NVS progress.
-static uint32_t _lastBridgeTokens = 0;
-static bool _tokensSynced = false;       // first-sight latch — see below
 static bool _levelUpPending = false;
 
 inline void statsOnBridgeTokens(uint32_t bridgeTotal) {
@@ -161,7 +174,14 @@ inline uint8_t statsMoodTier() {
 static uint32_t _lastNapEndMs = 0;
 static uint8_t  _energyAtNap  = 3;
 
-inline void statsOnWake() { _lastNapEndMs = millis(); _energyAtNap = 5; }
+inline void statsOnWake() {
+  _lastNapEndMs = millis();
+  _energyAtNap  = 5;
+  // Force RTC re-read so the clock shows fresh time immediately after waking,
+  // not the stale cached value from before nap.
+  extern uint32_t _clkLastRead;
+  _clkLastRead = 0;
+}
 
 inline uint8_t statsEnergyTier() {
   uint32_t hoursSince = (millis() - _lastNapEndMs) / 3600000;

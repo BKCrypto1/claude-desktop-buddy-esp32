@@ -743,14 +743,18 @@ static void drawApproval() {
   spr.setCursor(SAFE_L, H - AREA + 14);
   spr.print(tama.promptTool);
 
-  // Hint wraps at ~21 chars to two lines under the tool name
+  // Hint: two lines of 21 chars. Show the START on line 1 (tool name / command).
+  // If hint is longer than 21 chars, show the TAIL on line 2 — the meaningful
+  // part (path, argument) tends to live at the end, not the beginning.
   spr.setTextColor(p.textDim, p.bg);
   int hlen = strlen(tama.promptHint);
   spr.setCursor(SAFE_L, H - AREA + 24);
   spr.printf("%.21s", tama.promptHint);
   if (hlen > 21) {
+    // Show last 21 chars of hint so the key argument is always visible
+    const char* tail = tama.promptHint + hlen - 21;
     spr.setCursor(SAFE_L, H - AREA + 32);
-    spr.printf("%.21s", tama.promptHint + 21);
+    spr.printf("%.21s", tail);
   }
 
   if (responseSent) {
