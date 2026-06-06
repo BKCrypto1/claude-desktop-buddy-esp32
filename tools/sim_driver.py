@@ -408,7 +408,7 @@ class App(tk.Tk):
 
         btns = ttk.Frame(mf)
         btns.grid(row=1, column=0, sticky="we", **pad)
-        _bcts = ttk.Button(btns, text="Upload to sim", command=self._char_upload_sim)
+        _bcts = ttk.Button(btns, text="Upload to sim", command=self._char_upload_sim_any)
         _bcts.pack(side="left", padx=3)
         self._sim_widgets.append(_bcts)
         ttk.Button(btns, text="Flash USB",  command=self._char_flash_usb).pack(side="left", padx=3)
@@ -648,7 +648,7 @@ class App(tk.Tk):
         """Enable/disable controls based on active target."""
         for w in getattr(self, "_sim_widgets", []):
             try:
-                w.configure(state="normal" if target == "sim" else "disabled")
+                w.configure(state="normal" if target in ("sim", "desktop") else "disabled")
             except tk.TclError:
                 pass
         for w in getattr(self, "_ble_widgets", []):
@@ -913,13 +913,21 @@ class App(tk.Tk):
         self._send_cmd_any({"cmd": "species", "idx": idx})
 
     def _char_set_active(self):
-        """Set the selected character as active on the connected device."""
+        """Upload selected character and set it active on the connected device."""
+        tgt = self._hook_target.get()
         sel = self.char_tree.selection()
         if not sel:
             self._log("sys", "Select a character first.")
             return
-        self._send_cmd_any({"cmd": "species", "idx": 255})  # GIF mode
-        self._log("sys", "Set to GIF character mode.")
+        d = self._selected_char_dir()
+        if not d:
+            return
+        if tgt in ("sim", "desktop"):
+            self._char_upload_sim_any()
+        elif tgt == "hardware":
+            self._char_upload_ble()
+        else:
+            self._log("sys", "No target connected.")
 
     def _send_time(self):
         now = int(time.time())
@@ -1031,6 +1039,33 @@ class App(tk.Tk):
             self._qlog("sys", "Select a character first.")
             return None
         return sel[0]   # iid == absolute path
+
+    def _char_upload_sim_any(self):
+        """Upload selected character to sim — works in both Sim and Desktop mode."""
+        d = self._selected_char_dir()
+        if not d:
+            return
+        tgt  = self._hook_target.get()
+        name = os.path.basename(d)
+        self._char_action_progress.start(10)
+        def done():
+            self._inq.put(("log", ("sys", f"[upload] {name} done")))
+            self._char_action_progress.stop()
+            # Re-pause bridge in desktop mode after upload
+            if tgt == "desktop":
+                self.bridge.pause()
+                self._start_keepalive()
+
+        if tgt == "desktop":
+            # Temporarily steal the TCP connection from keepalive
+            self._stop_keepalive()
+            self.bridge.resume()
+            self._log("sys", "[upload] pausing keepalive for upload…")
+
+        threading.Thread(
+            target=self._upload_to_sim,
+            args=(d, name, lambda t, p=None: self._qlog("sys", f"[sim] {t}"), done),
+            daemon=True).start()
 
     def _char_upload_sim(self):
         d = self._selected_char_dir()

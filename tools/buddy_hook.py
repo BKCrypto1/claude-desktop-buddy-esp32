@@ -122,11 +122,10 @@ def read_session_tokens(transcript_path: str) -> int:
 # ── Entries (rolling tool list) ───────────────────────────────────────────────
 
 def push_entry(entries: list, tool_name: str, hint: str = "") -> list:
-    """Add a descriptive entry, keep last 8."""
-    label = hint.strip() or tool_name
-    if label:
+    """Add tool name to entries, keep last 8."""
+    if tool_name:
         entries = list(entries)
-        entries.append(label)
+        entries.append(tool_name[:22])
         entries = entries[-8:]
     return entries
 
@@ -196,28 +195,8 @@ def main():
             "entries":      entries,
         })
 
-        # Wait for buddy's decision (up to 60s)
-        deadline = time.time() + 60
-        while time.time() < deadline:
-            time.sleep(0.1)
-            decision = read_state().get("decision", "")
-            if decision in ("allow", "deny"):
-                write_state({"decision": ""})
-                out = {"hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": decision,
-                }}
-                if decision == "deny":
-                    out["hookSpecificOutput"]["permissionDecisionReason"] = \
-                        "Denied via Buddy"
-                print(json.dumps(out))
-                sys.exit(0)
-        # Timed out — allow by default
-        print(json.dumps({"hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "allow",
-        }}))
-        sys.exit(0)
+        # Informational only — buddy shows what's running but doesn't block Claude.
+        # Hardware approval (physical buttons) will gate this properly when device arrives.
 
     elif et == "posttooluse":
         # Clear prompt (approval was resolved), stay busy for next tool
