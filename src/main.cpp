@@ -753,23 +753,17 @@ static void drawApproval() {
     spr.printf("%.21s", tama.promptHint + 21);
   }
 
-  // Divider between approve (upper) and deny (lower) halves
-  int midY = H - AREA + 39;
-  spr.drawFastHLine(0, midY, W, p.textDim);
-
   if (responseSent) {
     spr.setTextColor(p.textDim, p.bg);
-    spr.setCursor(SAFE_L, midY + 14);
+    spr.setCursor(SAFE_L, SAFE_B - 12);
     spr.print("sent...");
   } else {
-    // Label in upper half (approve zone)
     spr.setTextColor(GREEN, p.bg);
-    spr.setCursor(SAFE_R - 48, H - AREA + 28);
-    spr.print("approve");
-    // Label in lower half (deny zone)
+    spr.setCursor(SAFE_L, SAFE_B - 12);
+    spr.print("A: approve");
     spr.setTextColor(HOT, p.bg);
-    spr.setCursor(SAFE_R - 24, midY + 14);
-    spr.print("deny");
+    spr.setCursor(SAFE_R - 48, SAFE_B - 12);
+    spr.print("B: deny");
   }
 }
 
