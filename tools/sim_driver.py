@@ -341,27 +341,24 @@ class App(tk.Tk):
         _eo2 = ttk.Entry(dev, textvariable=self.owner, width=14)
         _eo2.grid(row=0, column=1, sticky="we", **pad)
         _bso = ttk.Button(dev, text="Set",
-                          command=lambda: self._send({"cmd": "owner", "name": self.owner.get()}))
+                          command=lambda: self._send_cmd_any({"cmd": "owner", "name": self.owner.get()}))
         _bso.grid(row=0, column=2, **pad)
         ttk.Label(dev, text="Pet name").grid(row=0, column=3, sticky="e", **pad)
         _ep = ttk.Entry(dev, textvariable=self.pet, width=14)
         _ep.grid(row=0, column=4, sticky="we", **pad)
         _bsp = ttk.Button(dev, text="Set",
-                          command=lambda: self._send({"cmd": "name", "name": self.pet.get()}))
+                          command=lambda: self._send_cmd_any({"cmd": "name", "name": self.pet.get()}))
         _bsp.grid(row=0, column=5, **pad)
-        for w in (_bso, _bsp, _ep):
-            self._sim_widgets.append(w)
+        # Entry fields disabled in Desktop (read-only there); buttons work in all modes
+        self._sim_widgets.append(_ep)
 
-        # Utility buttons
+        # Utility buttons — Time sync and Status work in all connected modes
         util = ttk.Frame(dev)
         util.grid(row=2, column=0, columnspan=6, sticky="w", **pad)
-        for lbl, fn in [
-            ("Time sync",    self._send_time),
-            ("Status",       lambda: self._send({"cmd": "status"})),
-        ]:
-            _ub = ttk.Button(util, text=lbl, command=fn)
-            _ub.pack(side="left", padx=4)
-            self._sim_widgets.append(_ub)
+        ttk.Button(util, text="Time sync", command=self._send_time).pack(side="left", padx=4)
+        _sb = ttk.Button(util, text="Status", command=lambda: self._send({"cmd": "status"}))
+        _sb.pack(side="left", padx=4)
+        self._sim_widgets.append(_sb)  # Status only meaningful in Sim mode
 
         # ── Upload character to sim ───────────────────────────────────────────
         chf = ttk.LabelFrame(parent, text="Upload character to sim")
@@ -932,7 +929,7 @@ class App(tk.Tk):
     def _send_time(self):
         now = int(time.time())
         tz = -time.timezone if time.daylight == 0 else -time.altzone
-        self._send({"time": [now, tz]})
+        self._send_cmd_any({"time": [now, tz]})
 
     # ─── character upload (sim TCP) ───────────────────────────────────────────
 
