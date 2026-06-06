@@ -199,12 +199,12 @@ Any key press or screen tap wakes the panel.
 
 | State       | Trigger                                              | Feel                          |
 | ----------- | ---------------------------------------------------- | ----------------------------- |
-| `sleep`     | bridge not connected; clock face ambient             | eyes closed, slow breathing   |
-| `idle`      | connected, nothing urgent                            | blinking, looking around      |
-| `busy`      | 3+ sessions actively running                         | sweating, working             |
-| `attention` | approval pending                                     | alert, **red top-bar pulses** |
+| `sleep`     | time-of-day 22:00–7:00 (idle); clock face ambient   | eyes closed, slow breathing   |
+| `idle`      | connected, nothing running                           | blinking, looking around      |
+| `busy`      | tool running / sessions active                       | sweating, working             |
+| `attention` | approval pending (Bash/Agent gate)                   | alert, **red top-bar pulses** |
 | `celebrate` | level up (every 50K tokens); slow approval (≥ 5 s)  | confetti, bouncing            |
-| `dizzy`     | shake device; denial                                 | spiral eyes, wobbling         |
+| `dizzy`     | shake device; denial via buddy                       | spiral eyes, wobbling         |
 | `heart`     | fast approval (< 5 s); tap buddy on home screen      | floating hearts               |
 
 Nineteen ASCII species, each with all seven animations. **Settings →
@@ -349,6 +349,48 @@ sim/build/buddy-sim      # run the firmware in an SDL window
 python3 tools/sim_driver.py
 ```
 
+### Target modes
+
+The Buddy Manager has four target modes (toggle via `tools/buddy_target.sh` or the radio buttons):
+
+| Mode | Who owns TCP | Hook behaviour | Use when |
+| --- | --- | --- | --- |
+| **Desktop** | keepalive | Hooks drive state; approval prompts block Claude | Actively using Claude Code |
+| **Sim** | bridge (sim_driver) | Manual controls only; keepalive stopped | Testing animations manually |
+| **Hardware** | BLE | BLE-only; both bridge and keepalive stopped | Real device connected |
+| **Off** | — | Everything paused | |
+
+### Desktop mode (Claude Code hooks)
+
+In **Desktop** mode the buddy reacts to live Claude Code activity via hooks wired in
+`~/.claude/settings.json`. A keepalive process owns the TCP connection and translates
+the shared state file (`~/.buddy_state`) into bridge payloads every 50 ms (or
+instantly on change).
+
+**Hook → animation mapping:**
+
+| Hook event | Buddy state | Notes |
+| --- | --- | --- |
+| PreToolUse (safe read-only) | busy | grep, cat, git log, etc. — auto-approved |
+| PreToolUse (Bash / Agent) | attention | Blocks Claude up to 60 s for your decision |
+| PostToolUse | busy → idle | Clears approval screen |
+| Stop | celebrate | Claude finished responding |
+| Notification | attention | Something needs your attention |
+
+**Approval flow (Desktop mode):**
+
+1. Claude wants to run a Bash command or spawn an Agent
+2. Buddy shows approval screen — tap **upper half** to approve, **lower half** to deny
+3. Buddy sends decision back; Claude proceeds or is blocked
+4. Fast approval (< 5 s) triggers a heart animation; denial triggers dizzy
+
+**Clock & sleep in Desktop mode:**
+
+The clock face appears automatically when Claude is idle and the RTC has been synced
+(time is sent from the desktop on connect). Between 22:00–7:00 the character plays
+its sleep animation on top of the clock. Any Claude activity (tool use, sessions
+running) hides the clock immediately.
+
 ### Simulator tab
 
 Drives the desktop sim over TCP (`127.0.0.1:31415`) instead of BLE GATT,
@@ -369,9 +411,11 @@ mirroring what the Hardware Buddy app pushes to real hardware:
 
 - **My Characters** — lists every pack in `characters/` with file count
   and size. Select one and click:
-  - **Upload to sim** — stream over TCP to the running simulator
+  - **Upload to sim** — stream over TCP to the running simulator (works in both Sim and Desktop mode)
   - **Flash USB** — stage into `data/` and run `uploadfs` via PlatformIO
   - **Upload BLE** — send wirelessly to real hardware via `ble_driver.py`
+  - **Set active** — upload and switch to the selected character
+- **Active character** — species dropdown + **Set on device** button to switch without re-uploading
 - **Petdex import** — paste a URL or pet name, tick Pixel art if needed,
   click Import. Downloads, converts, and uploads to the sim in one step.
 - **Strip import** — pick a directory of strip PNGs, assign each Claude
