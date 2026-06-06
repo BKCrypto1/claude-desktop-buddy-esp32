@@ -165,6 +165,17 @@ def main():
 
     et = event_type.lower()
 
+    # Only these tools block for approval — everything else is informational only
+    APPROVAL_GATE = {"Bash", "Agent"}
+
+    # Bash commands that are read-only/safe — skip approval screen, auto-allow instantly
+    SAFE_BASH_PREFIXES = (
+        "grep", "rg", "find", "ls", "cat", "head", "tail", "wc", "diff",
+        "sed -n", "awk", "sort", "uniq", "echo", "pwd", "which", "file",
+        "git log", "git status", "git diff", "git show", "git branch",
+        "python3 -c", "node -e", "jq",
+    )
+
     if et == "pretooluse":
         # Extract a human-readable hint from tool_input for the approval prompt
         tool_input = payload.get("tool_input", {}) or {}
@@ -181,22 +192,56 @@ def main():
             hint = str(tool_input)[:43]
 
         entries = push_entry(entries, tool_name, hint)
-        pid = "desk_%d" % int(time.time() * 1000)
 
-        # Clear any stale decision, show attention prompt on buddy
-        write_state({
-            "state":        "attention",
-            "tokens":       tokens_today,
-            "tokens_today": tokens_today,
-            "tool":         tool_name,
-            "hint":         hint,
-            "prompt_id":    pid,
-            "decision":     "",
-            "entries":      entries,
-        })
+        # For Bash: auto-allow safe read-only commands without showing approval screen
+        bash_cmd = hint  # hint already has the command text
+        is_safe_bash = (
+            tool_name == "Bash" and
+            any(bash_cmd.lstrip().startswith(p) for p in SAFE_BASH_PREFIXES)
+        )
 
-        # Informational only — buddy shows what's running but doesn't block Claude.
-        # Hardware approval (physical buttons) will gate this properly when device arrives.
+        if tool_name in APPROVAL_GATE and not is_safe_bash:
+            pid = "desk_%d" % int(time.time() * 1000)
+
+            # Show approval prompt on buddy and wait for decision
+            write_state({
+                "state":        "attention",
+                "tokens":       tokens_today,
+                "tokens_today": tokens_today,
+                "tool":         tool_name,
+                "hint":         hint,
+                "prompt_id":    pid,
+                "decision":     "",
+                "entries":      entries,
+            })
+
+            # Wait for buddy decision (up to 60 s), then pass allow/deny to Claude.
+            deadline = time.time() + 60
+            decision = ""
+            while time.time() < deadline:
+                time.sleep(0.1)
+                s = read_state()
+                if s.get("prompt_id") == pid and s.get("decision"):
+                    decision = s["decision"]
+                    break
+
+            if decision == "deny":
+                print(json.dumps({"hookSpecificOutput": {"permissionDecision": "deny"}}))
+            else:
+                print(json.dumps({"hookSpecificOutput": {"permissionDecision": "allow"}}))
+        else:
+            # Informational only — show busy state, don't block Claude
+            write_state({
+                "state":        "busy",
+                "tokens":       tokens_today,
+                "tokens_today": tokens_today,
+                "tool":         tool_name,
+                "hint":         hint,
+                "entries":      entries,
+            })
+            # For safe Bash: still return allow so Claude's own dialog never fires
+            if tool_name == "Bash":
+                print(json.dumps({"hookSpecificOutput": {"permissionDecision": "allow"}}))
 
     elif et == "posttooluse":
         # Clear prompt (approval was resolved), stay busy for next tool

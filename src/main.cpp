@@ -738,35 +738,38 @@ static void drawApproval() {
   if (waited >= 10) spr.setTextColor(HOT, p.bg);
   spr.printf("approve? %lus", (unsigned long)waited);
 
-  // Size 2 only if it fits one line (~10 chars at 12px on 135px screen)
-  int toolLen = strlen(tama.promptTool);
   spr.setTextColor(p.text, p.bg);
-  spr.setTextSize(toolLen <= 10 ? 2 : 1);
-  spr.setCursor(SAFE_L, H - AREA + (toolLen <= 10 ? 14 : 18));
-  spr.print(tama.promptTool);
   spr.setTextSize(1);
+  spr.setCursor(SAFE_L, H - AREA + 14);
+  spr.print(tama.promptTool);
 
   // Hint wraps at ~21 chars to two lines under the tool name
   spr.setTextColor(p.textDim, p.bg);
   int hlen = strlen(tama.promptHint);
-  spr.setCursor(SAFE_L, H - AREA + 34);
+  spr.setCursor(SAFE_L, H - AREA + 24);
   spr.printf("%.21s", tama.promptHint);
   if (hlen > 21) {
-    spr.setCursor(SAFE_L, H - AREA + 42);
+    spr.setCursor(SAFE_L, H - AREA + 32);
     spr.printf("%.21s", tama.promptHint + 21);
   }
 
+  // Divider between approve (upper) and deny (lower) halves
+  int midY = H - AREA + 39;
+  spr.drawFastHLine(0, midY, W, p.textDim);
+
   if (responseSent) {
     spr.setTextColor(p.textDim, p.bg);
-    spr.setCursor(SAFE_L, SAFE_B - 12);
+    spr.setCursor(SAFE_L, midY + 14);
     spr.print("sent...");
   } else {
+    // Label in upper half (approve zone)
     spr.setTextColor(GREEN, p.bg);
-    spr.setCursor(SAFE_L, SAFE_B - 12);
-    spr.print("A: approve");
+    spr.setCursor(SAFE_R - 48, H - AREA + 28);
+    spr.print("approve");
+    // Label in lower half (deny zone)
     spr.setTextColor(HOT, p.bg);
-    spr.setCursor(SAFE_R - 48, SAFE_B - 12);
-    spr.print("B: deny");
+    spr.setCursor(SAFE_R - 24, midY + 14);
+    spr.print("deny");
   }
 }
 
@@ -899,7 +902,9 @@ void drawHUD() {
   // mixed line of 22 bytes (~7 Chinese OR 22 ASCII) fits W=184.
   const int SHOW = 3, LH = 10, WIDTH = 22;
   const int AREA = SHOW * LH + 4;
-  spr.fillRect(0, H - AREA, W, AREA, p.bg);
+  // Clear the full 78px approval-area height to erase any stale approval
+  // content when transitioning back from an approval prompt.
+  spr.fillRect(0, H - 78, W, 78, p.bg);
 
   // Menu/settings/reset should hide the HUD strip underneath — panels are
   // centered and don't cover the bottom 34 px on their own.

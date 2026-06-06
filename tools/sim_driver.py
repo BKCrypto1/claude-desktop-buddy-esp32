@@ -1062,10 +1062,17 @@ class App(tk.Tk):
             self.bridge.resume()
             self._log("sys", "[upload] pausing keepalive for upload…")
 
-        threading.Thread(
-            target=self._upload_to_sim,
-            args=(d, name, lambda t, p=None: self._qlog("sys", f"[sim] {t}"), done),
-            daemon=True).start()
+        def _run_upload():
+            if tgt == "desktop":
+                if not self.bridge.wait_connected(timeout=5.0):
+                    self._qlog("sys", "[upload] could not connect to sim (timeout)")
+                    self.bridge.pause()
+                    self._start_keepalive()
+                    self._char_action_progress.stop()
+                    return
+            self._upload_to_sim(d, name, lambda t, p=None: self._qlog("sys", f"[sim] {t}"), done)
+
+        threading.Thread(target=_run_upload, daemon=True).start()
 
     def _char_upload_sim(self):
         d = self._selected_char_dir()
