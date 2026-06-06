@@ -121,11 +121,12 @@ def read_session_tokens(transcript_path: str) -> int:
 
 # ── Entries (rolling tool list) ───────────────────────────────────────────────
 
-def push_entry(entries: list, tool_name: str) -> list:
-    """Add tool_name to entries, keep last 8."""
-    if tool_name:
+def push_entry(entries: list, tool_name: str, hint: str = "") -> list:
+    """Add a descriptive entry, keep last 8."""
+    label = hint.strip() or tool_name
+    if label:
         entries = list(entries)
-        entries.append(tool_name)
+        entries.append(label)
         entries = entries[-8:]
     return entries
 
@@ -166,7 +167,6 @@ def main():
     et = event_type.lower()
 
     if et == "pretooluse":
-        entries = push_entry(entries, tool_name)
         # Extract a human-readable hint from tool_input for the approval prompt
         tool_input = payload.get("tool_input", {}) or {}
         if isinstance(tool_input, dict):
@@ -181,22 +181,53 @@ def main():
         else:
             hint = str(tool_input)[:43]
 
+        entries = push_entry(entries, tool_name, hint)
+        pid = "desk_%d" % int(time.time() * 1000)
+
+        # Clear any stale decision, show attention prompt on buddy
+        write_state({
+            "state":        "attention",
+            "tokens":       tokens_today,
+            "tokens_today": tokens_today,
+            "tool":         tool_name,
+            "hint":         hint,
+            "prompt_id":    pid,
+            "decision":     "",
+            "entries":      entries,
+        })
+
+        # Wait for buddy's decision (up to 60s)
+        deadline = time.time() + 60
+        while time.time() < deadline:
+            time.sleep(0.1)
+            decision = read_state().get("decision", "")
+            if decision in ("allow", "deny"):
+                write_state({"decision": ""})
+                out = {"hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": decision,
+                }}
+                if decision == "deny":
+                    out["hookSpecificOutput"]["permissionDecisionReason"] = \
+                        "Denied via Buddy"
+                print(json.dumps(out))
+                sys.exit(0)
+        # Timed out — allow by default
+        print(json.dumps({"hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "allow",
+        }}))
+        sys.exit(0)
+
+    elif et == "posttooluse":
+        # Clear prompt (approval was resolved), stay busy for next tool
         write_state({
             "state":        "busy",
             "tokens":       tokens_today,
             "tokens_today": tokens_today,
             "tool":         tool_name,
-            "hint":         hint,
-            "entries":      entries,
-        })
-
-    elif et == "posttooluse":
-        entries = push_entry(entries, tool_name)
-        write_state({
-            "state":        "celebrate",
-            "tokens":       tokens_today,
-            "tokens_today": tokens_today,
-            "tool":         tool_name,
+            "hint":         "",
+            "prompt_id":    "",   # clears approval screen on buddy
             "entries":      entries,
         })
 

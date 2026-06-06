@@ -22,7 +22,7 @@ TARGET_FILE = os.path.expanduser("~/.buddy_target")
 STATE_FILE  = os.path.expanduser("~/.buddy_state")
 SIM_HOST    = "127.0.0.1"
 SIM_PORT    = 31415
-TICK_S      = 2.0
+TICK_S      = 0.5
 
 
 def get_target() -> str:
@@ -100,19 +100,69 @@ def send_line(sock, obj: dict):
     sock.sendall(line)
 
 
+def handle_incoming(raw: str):
+    """Process a message sent FROM the sim to us (e.g. permission decisions)."""
+    try:
+        obj = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return
+    cmd = obj.get("cmd")
+    if cmd == "permission":
+        decision = obj.get("decision", "")
+        # Map device decisions to Claude Code permission decisions
+        # "once" or "always" → allow, "deny" → deny
+        perm = "allow" if decision in ("once", "always") else "deny"
+        clear_field("decision", perm)
+        print(f"[buddy_keepalive] permission decision: {decision} → {perm}")
+
+
+def state_mtime() -> float:
+    try:
+        return os.stat(STATE_FILE).st_mtime
+    except OSError:
+        return 0.0
+
+
 def run_sim():
     print(f"[buddy_keepalive] connecting to sim {SIM_HOST}:{SIM_PORT}")
     celebrate_until  = 0.0
-    approved_sent    = False   # track whether we already sent approved_add this celebrate
+    approved_sent    = False
+    last_mtime       = 0.0   # track state file changes for instant sends
 
     while True:
         try:
             with socket.create_connection((SIM_HOST, SIM_PORT), timeout=5.0) as s:
                 print("[buddy_keepalive] connected")
+                s.settimeout(0.05)   # non-blocking reads
+                last_send = 0.0
+                rx_buf    = ""
                 while True:
-                    now       = time.time()
-                    state_obj = read_state()
-                    state     = state_obj.get("state", "idle")
+                    now   = time.time()
+                    mtime = state_mtime()
+
+                    # Read any incoming data from sim (permission decisions, acks)
+                    try:
+                        chunk = s.recv(1024).decode("utf-8", errors="replace")
+                        if chunk:
+                            rx_buf += chunk
+                            while "\n" in rx_buf:
+                                line, rx_buf = rx_buf.split("\n", 1)
+                                line = line.strip()
+                                if line:
+                                    handle_incoming(line)
+                    except socket.timeout:
+                        pass
+                    except (OSError, ConnectionResetError):
+                        raise
+
+                    # Send immediately on state file change, otherwise every TICK_S
+                    if mtime == last_mtime and (now - last_send) < TICK_S:
+                        continue
+
+                    last_mtime = mtime
+                    last_send  = now
+                    state_obj  = read_state()
+                    state      = state_obj.get("state", "idle")
 
                     # ── Drain queued commands first ───────────────────────────
                     cmds = state_obj.get("cmds", [])

@@ -1359,6 +1359,8 @@ void loop() {
   if (!napping && !screenOff) {
     if (blePasskey()) drawPasskey();
     else if (clocking) drawClock();
+    // Approval prompt always takes over the screen regardless of display mode
+    else if (tama.promptId[0]) drawHUD();
     else if (displayMode == DISP_INFO) drawInfo();
     else if (displayMode == DISP_PET) drawPet();
     else if (settings().hud) drawHUD();

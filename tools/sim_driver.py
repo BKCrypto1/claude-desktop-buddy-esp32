@@ -162,9 +162,11 @@ class App(tk.Tk):
         self._upload_thread = None
         self._celebrate_timer = None
         self._build_ui()
-        # Pause bridge immediately if target isn't sim
-        if self._read_hook_target() != "sim":
+        # Pause bridge and disable sim controls if target isn't sim
+        initial_target = self._read_hook_target()
+        if initial_target != "sim":
             self.bridge.pause()
+        self.after(100, lambda: self._set_sim_controls(initial_target))
         self.after(50, self._drain)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -224,6 +226,9 @@ class App(tk.Tk):
     # ── Simulator tab ─────────────────────────────────────────────────────────
 
     def _build_simulator_tab(self, parent, pad):
+        self._sim_widgets = []      # enabled only in Sim mode
+        self._ble_widgets = []      # enabled only in Hardware mode
+
         # ── Claude state ──────────────────────────────────────────────────────
         live = ttk.LabelFrame(parent, text="Claude state")
         live.pack(fill="x", **pad)
@@ -254,9 +259,10 @@ class App(tk.Tk):
                 inc  = item[2] if len(item) > 2 else 1
                 w    = item[3] if len(item) > 3 else 4
                 ttk.Label(counters, text=lbl).grid(row=0, column=col, sticky="e", padx=(4, 2))
-                ttk.Spinbox(counters, from_=0, to=10**7, increment=inc,
-                            textvariable=var, width=w
-                            ).grid(row=0, column=col+1, sticky="w")
+                sb = ttk.Spinbox(counters, from_=0, to=10**7, increment=inc,
+                                 textvariable=var, width=w)
+                sb.grid(row=0, column=col+1, sticky="w")
+                self._sim_widgets.append(sb)
                 col += 2
 
         # Quick state presets — two rows of buttons, one per buddy state
@@ -270,27 +276,33 @@ class App(tk.Tk):
             ("Busy",      self._preset_busy),
             ("Attention", self._preset_attention),
         ]):
-            ttk.Button(presets, text=lbl, command=fn, width=9).grid(
-                row=0, column=col + 1, padx=2, pady=1)
+            b = ttk.Button(presets, text=lbl, command=fn, width=9)
+            b.grid(row=0, column=col + 1, padx=2, pady=1)
+            self._sim_widgets.append(b)
         for col, (lbl, fn) in enumerate([
             ("Celebrate", self._preset_celebrate),
             ("Dizzy",     self._preset_dizzy),
             ("Heart",     self._preset_heart),
         ]):
-            ttk.Button(presets, text=lbl, command=fn, width=9).grid(
-                row=1, column=col + 1, padx=2, pady=1)
+            b = ttk.Button(presets, text=lbl, command=fn, width=9)
+            b.grid(row=1, column=col + 1, padx=2, pady=1)
+            self._sim_widgets.append(b)
 
         # Message + entries
         ttk.Label(live, text="msg").grid(row=2, column=0, sticky="e", **pad)
         self.msg = tk.StringVar()
-        ttk.Entry(live, textvariable=self.msg).grid(row=2, column=1, sticky="we", **pad)
+        _e = ttk.Entry(live, textvariable=self.msg)
+        _e.grid(row=2, column=1, sticky="we", **pad)
+        self._sim_widgets.append(_e)
 
         ttk.Label(live, text="entries").grid(row=3, column=0, sticky="ne", **pad)
         self.entries = tk.Text(live, height=2, width=44)
         self.entries.grid(row=3, column=1, sticky="we", **pad)
+        self._sim_widgets.append(self.entries)
 
-        ttk.Button(live, text="Send live update",
-                   command=self._send_live).grid(row=4, column=1, sticky="e", **pad)
+        _b = ttk.Button(live, text="Send live update", command=self._send_live)
+        _b.grid(row=4, column=1, sticky="e", **pad)
+        self._sim_widgets.append(_b)
 
         # ── Approval prompt ───────────────────────────────────────────────────
         apv = ttk.LabelFrame(parent, text="Approval prompt")
@@ -300,14 +312,19 @@ class App(tk.Tk):
         self.tool = tk.StringVar(value="Bash")
         self.hint = tk.StringVar(value="rm -rf /")
         ttk.Label(apv, text="tool").grid(row=0, column=0, sticky="e", **pad)
-        ttk.Entry(apv, textvariable=self.tool, width=14).grid(row=0, column=1, sticky="w", **pad)
+        _et = ttk.Entry(apv, textvariable=self.tool, width=14)
+        _et.grid(row=0, column=1, sticky="w", **pad)
+        self._sim_widgets.append(_et)
         ttk.Label(apv, text="hint").grid(row=0, column=2, sticky="e", **pad)
-        ttk.Entry(apv, textvariable=self.hint).grid(row=0, column=3, sticky="we", **pad)
-        ttk.Button(apv, text="Send prompt",
-                   command=self._send_prompt).grid(row=0, column=4, **pad)
-        ttk.Button(apv, text="Clear",
-                   command=lambda: self._send({"prompt": None})
-                   ).grid(row=0, column=5, **pad)
+        _eh = ttk.Entry(apv, textvariable=self.hint)
+        _eh.grid(row=0, column=3, sticky="we", **pad)
+        self._sim_widgets.append(_eh)
+        _bp = ttk.Button(apv, text="Send prompt", command=self._send_prompt)
+        _bp.grid(row=0, column=4, **pad)
+        self._sim_widgets.append(_bp)
+        _bc = ttk.Button(apv, text="Clear", command=lambda: self._send({"prompt": None}))
+        _bc.grid(row=0, column=5, **pad)
+        self._sim_widgets.append(_bc)
 
         # ── Device settings ───────────────────────────────────────────────────
         dev = ttk.LabelFrame(parent, text="Device")
@@ -318,26 +335,22 @@ class App(tk.Tk):
         # Owner / pet name
         self.owner = tk.StringVar(value="Bryan")
         self.pet   = tk.StringVar(value="Buddy")
+        _eo = ttk.Entry(dev, textvariable=self.owner, width=14)
+        _eo.grid(row=0, column=0, columnspan=2, sticky="we", **pad)
         ttk.Label(dev, text="Owner").grid(row=0, column=0, sticky="e", **pad)
-        ttk.Entry(dev, textvariable=self.owner, width=14).grid(row=0, column=1, sticky="we", **pad)
-        ttk.Button(dev, text="Set",
-                   command=lambda: self._send({"cmd": "owner", "name": self.owner.get()})
-                   ).grid(row=0, column=2, **pad)
+        _eo2 = ttk.Entry(dev, textvariable=self.owner, width=14)
+        _eo2.grid(row=0, column=1, sticky="we", **pad)
+        _bso = ttk.Button(dev, text="Set",
+                          command=lambda: self._send({"cmd": "owner", "name": self.owner.get()}))
+        _bso.grid(row=0, column=2, **pad)
         ttk.Label(dev, text="Pet name").grid(row=0, column=3, sticky="e", **pad)
-        ttk.Entry(dev, textvariable=self.pet, width=14).grid(row=0, column=4, sticky="we", **pad)
-        ttk.Button(dev, text="Set",
-                   command=lambda: self._send({"cmd": "name", "name": self.pet.get()})
-                   ).grid(row=0, column=5, **pad)
-
-        # Species
-        self.species_choice = tk.StringVar(value="GIF (uploaded character)")
-        ttk.Label(dev, text="Species").grid(row=1, column=0, sticky="e", **pad)
-        ttk.Combobox(dev, textvariable=self.species_choice, state="readonly", width=28,
-                     values=["GIF (uploaded character)"] + [
-                         f"{i}: {n}" for i, n in enumerate(SPECIES_NAMES)]
-                     ).grid(row=1, column=1, columnspan=4, sticky="we", **pad)
-        ttk.Button(dev, text="Set species",
-                   command=self._send_species).grid(row=1, column=5, **pad)
+        _ep = ttk.Entry(dev, textvariable=self.pet, width=14)
+        _ep.grid(row=0, column=4, sticky="we", **pad)
+        _bsp = ttk.Button(dev, text="Set",
+                          command=lambda: self._send({"cmd": "name", "name": self.pet.get()}))
+        _bsp.grid(row=0, column=5, **pad)
+        for w in (_bso, _bsp, _ep):
+            self._sim_widgets.append(w)
 
         # Utility buttons
         util = ttk.Frame(dev)
@@ -346,7 +359,9 @@ class App(tk.Tk):
             ("Time sync",    self._send_time),
             ("Status",       lambda: self._send({"cmd": "status"})),
         ]:
-            ttk.Button(util, text=lbl, command=fn).pack(side="left", padx=4)
+            _ub = ttk.Button(util, text=lbl, command=fn)
+            _ub.pack(side="left", padx=4)
+            self._sim_widgets.append(_ub)
 
         # ── Upload character to sim ───────────────────────────────────────────
         chf = ttk.LabelFrame(parent, text="Upload character to sim")
@@ -355,18 +370,18 @@ class App(tk.Tk):
 
         self.char_name   = tk.StringVar(value="")
         self.char_folder = tk.StringVar(value="")
-        ttk.Button(chf, text="Choose folder…",
-                   command=self._pick_char_folder).grid(row=0, column=0, **pad)
+        _bcf = ttk.Button(chf, text="Choose folder…", command=self._pick_char_folder)
+        _bcf.grid(row=0, column=0, **pad)
         ttk.Label(chf, textvariable=self.char_folder, foreground="#888",
                   anchor="w").grid(row=0, column=1, sticky="we", **pad)
-        self.upload_btn = ttk.Button(chf, text="Upload to sim",
-                                     command=self._start_upload)
+        self.upload_btn = ttk.Button(chf, text="Upload to sim", command=self._start_upload)
         self.upload_btn.grid(row=0, column=2, **pad)
         self.char_progress = ttk.Progressbar(chf, mode="determinate")
         self.char_progress.grid(row=1, column=0, columnspan=2, sticky="we", **pad)
         self.char_status = tk.StringVar(value="idle")
         ttk.Label(chf, textvariable=self.char_status, foreground="#888"
                   ).grid(row=1, column=2, sticky="w", **pad)
+        self._sim_widgets.extend([_bcf, self.upload_btn])
 
     # ── Characters tab ────────────────────────────────────────────────────────
 
@@ -393,15 +408,37 @@ class App(tk.Tk):
 
         btns = ttk.Frame(mf)
         btns.grid(row=1, column=0, sticky="we", **pad)
-        ttk.Button(btns, text="Upload to sim", command=self._char_upload_sim ).pack(side="left", padx=3)
-        ttk.Button(btns, text="Flash USB",     command=self._char_flash_usb  ).pack(side="left", padx=3)
-        ttk.Button(btns, text="Upload BLE",    command=self._char_upload_ble ).pack(side="left", padx=3)
-        ttk.Button(btns, text="Refresh",       command=self._refresh_chars   ).pack(side="right", padx=3)
+        _bcts = ttk.Button(btns, text="Upload to sim", command=self._char_upload_sim)
+        _bcts.pack(side="left", padx=3)
+        self._sim_widgets.append(_bcts)
+        ttk.Button(btns, text="Flash USB",  command=self._char_flash_usb).pack(side="left", padx=3)
+        _bble = ttk.Button(btns, text="Upload BLE", command=self._char_upload_ble)
+        _bble.pack(side="left", padx=3)
+        self._ble_widgets.append(_bble)
+        # Set active — works in all connected modes
+        ttk.Button(btns, text="Set active", command=self._char_set_active).pack(side="left", padx=3)
+        ttk.Button(btns, text="Refresh", command=self._refresh_chars).pack(side="right", padx=3)
 
         self._char_action_progress = ttk.Progressbar(mf, mode="indeterminate")
         self._char_action_progress.grid(row=2, column=0, sticky="we", padx=6, pady=2)
 
         self._refresh_chars()
+
+        # ── Active character / species ────────────────────────────────────────
+        act = ttk.LabelFrame(parent, text="Active character")
+        act.pack(fill="x", **pad)
+        act.columnconfigure(1, weight=1)
+
+        ttk.Label(act, text="Species").grid(row=0, column=0, sticky="e", **pad)
+        self.species_choice = tk.StringVar(value="GIF (uploaded character)")
+        self._species_combo = ttk.Combobox(
+            act, textvariable=self.species_choice, state="readonly", width=28,
+            values=["GIF (uploaded character)"] + [
+                f"{i}: {n}" for i, n in enumerate(SPECIES_NAMES)]
+        )
+        self._species_combo.grid(row=0, column=1, sticky="we", **pad)
+        ttk.Button(act, text="Set on device",
+                   command=self._set_species_any).grid(row=0, column=2, **pad)
 
         # ── Petdex import ──
         pdx = ttk.LabelFrame(parent, text="Petdex import  (download → convert → upload to sim)")
@@ -569,6 +606,7 @@ class App(tk.Tk):
             self.sim_status.set("disconnected")
 
         self._refresh_status()
+        self._set_sim_controls(tgt)
         self._log("sys", f"[hook] target → {tgt}")
 
     def _keepalive_running(self) -> bool:
@@ -605,6 +643,19 @@ class App(tk.Tk):
             self._log("sys", f"[hook] keepalive stopped (pid {pid})")
         except (FileNotFoundError, ValueError, OSError, ProcessLookupError):
             pass
+
+    def _set_sim_controls(self, target: str):
+        """Enable/disable controls based on active target."""
+        for w in getattr(self, "_sim_widgets", []):
+            try:
+                w.configure(state="normal" if target == "sim" else "disabled")
+            except tk.TclError:
+                pass
+        for w in getattr(self, "_ble_widgets", []):
+            try:
+                w.configure(state="normal" if target == "hardware" else "disabled")
+            except tk.TclError:
+                pass
 
     def _refresh_status(self):
         """Update the connection label and status for the current target."""
@@ -784,6 +835,91 @@ class App(tk.Tk):
         choice = self.species_choice.get()
         idx = 255 if choice.startswith("GIF") else int(choice.split(":", 1)[0])
         self._send({"cmd": "species", "idx": idx})
+
+    # ── Unified command sender — routes to sim TCP, desktop cmds queue, or BLE ──
+
+    def _send_cmd_any(self, cmd: dict):
+        """Send a command to whatever is currently connected."""
+        tgt = self._hook_target.get()
+        if tgt == "sim":
+            self._send(cmd)
+        elif tgt in ("desktop",):
+            # Route through keepalive cmds queue
+            try:
+                with open(STATE_FILE) as f:
+                    state = json.loads(f.read())
+            except Exception:
+                state = {}
+            cmds = state.get("cmds", [])
+            cmds.append(cmd)
+            state["cmds"] = cmds
+            try:
+                with open(STATE_FILE, "w") as f:
+                    f.write(json.dumps(state))
+                self._log("sys", f"[cmd] queued for desktop: {cmd}")
+            except OSError as e:
+                self._log("sys", f"[cmd] error: {e}")
+        elif tgt == "hardware":
+            self._send_ble_cmd(cmd)
+        else:
+            self._log("sys", "[cmd] no target connected")
+
+    def _send_ble_cmd(self, cmd: dict):
+        """Send a single JSON command to hardware over BLE in a background thread."""
+        def _run():
+            try:
+                from bleak import BleakClient, BleakScanner
+                import asyncio
+
+                NUS_RX = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"
+                addr_file = os.path.expanduser("~/.buddy_ble_addr")
+
+                async def _go():
+                    address = None
+                    try:
+                        with open(addr_file) as f:
+                            address = f.read().strip()
+                    except FileNotFoundError:
+                        pass
+                    if not address:
+                        device = await BleakScanner.find_device_by_filter(
+                            lambda d, _: d.name and d.name.startswith("Claude-"),
+                            timeout=5.0)
+                        if not device:
+                            self._qlog("sys", "[BLE] no Claude-* device found")
+                            return
+                        address = device.address
+                        with open(addr_file, "w") as f:
+                            f.write(address)
+                    async with BleakClient(address, timeout=5.0) as client:
+                        mtu  = max(20, client.mtu_size - 3)
+                        line = (json.dumps(cmd, separators=(",", ":")) + "\n").encode()
+                        for i in range(0, len(line), mtu):
+                            await client.write_gatt_char(NUS_RX, line[i:i+mtu], response=False)
+                        self._qlog("sys", f"[BLE] sent: {cmd}")
+
+                asyncio.run(_go())
+            except ImportError:
+                self._qlog("sys", "[BLE] bleak not installed — pip install bleak")
+            except Exception as e:
+                self._qlog("sys", f"[BLE] error: {e}")
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _set_species_any(self):
+        """Set species on whatever is currently connected."""
+        choice = self.species_choice.get()
+        idx = 255 if choice.startswith("GIF") else int(choice.split(":", 1)[0])
+        self._send_cmd_any({"cmd": "species", "idx": idx})
+
+    def _char_set_active(self):
+        """Set the selected character as active on the connected device."""
+        sel = self.char_tree.selection()
+        if not sel:
+            self._log("sys", "Select a character first.")
+            return
+        self._send_cmd_any({"cmd": "species", "idx": 255})  # GIF mode
+        self._log("sys", "Set to GIF character mode.")
 
     def _send_time(self):
         now = int(time.time())
