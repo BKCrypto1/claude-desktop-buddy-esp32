@@ -33,6 +33,7 @@ except ImportError:
 NUS_SERVICE = "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
 NUS_RX      = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"   # desktop → device (write)
 NUS_TX      = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"   # device → desktop (notify)
+ADDR_FILE   = os.path.expanduser("~/.buddy_ble_addr")   # cached for buddy_ble_keepalive.py
 
 # File data bytes per chunk. Base64 expands 3:4, plus ~20 bytes JSON framing.
 # 192 bytes → ~276-byte JSON line, sent in multiple MTU-sized BLE writes;
@@ -244,6 +245,13 @@ async def main():
         await buddy.start_notify()
         await asyncio.sleep(0.3)   # let the notification subscription settle
         success = await upload(buddy, args.char_dir)
+
+    if success:
+        try:
+            with open(ADDR_FILE, "w") as f:
+                f.write(address)
+        except OSError:
+            pass
 
     sys.exit(0 if success else 1)
 

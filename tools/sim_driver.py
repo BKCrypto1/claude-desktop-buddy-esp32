@@ -46,6 +46,9 @@ TARGET_FILE   = os.path.expanduser("~/.buddy_target")
 STATE_FILE    = os.path.expanduser("~/.buddy_state")
 KEEPALIVE_PID = os.path.expanduser("~/.buddy_keepalive.pid")
 KEEPALIVE_PY  = os.path.join(TOOLS_DIR, "buddy_keepalive.py")
+BLE_KEEPALIVE_PID = os.path.expanduser("~/.buddy_ble_keepalive.pid")
+BLE_KEEPALIVE_PY  = os.path.join(TOOLS_DIR, "buddy_ble_keepalive.py")
+BLE_ADDR_FILE     = os.path.expanduser("~/.buddy_ble_addr")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -588,17 +591,24 @@ class App(tk.Tk):
         if tgt == "desktop":
             self.bridge.pause()        # keepalive owns the TCP slot
             self._start_keepalive()
+            self._stop_ble_keepalive()
             self.sim_status.set("disconnected")
         elif tgt == "hardware":
             self.bridge.pause()
             self._stop_keepalive()
-            self.sim_status.set("not paired")
+            if os.path.exists(BLE_ADDR_FILE):
+                self._start_ble_keepalive()
+                self.sim_status.set("connecting")
+            else:
+                self.sim_status.set("not paired")
         elif tgt == "off":
             self.bridge.pause()
             self._stop_keepalive()
+            self._stop_ble_keepalive()
             self.sim_status.set("off")
         else:  # sim
             self._stop_keepalive()
+            self._stop_ble_keepalive()
             self.bridge.resume()       # sim_driver owns the TCP slot
             self.sim_status.set("disconnected")
 
@@ -641,6 +651,41 @@ class App(tk.Tk):
         except (FileNotFoundError, ValueError, OSError, ProcessLookupError):
             pass
 
+    def _ble_keepalive_running(self) -> bool:
+        try:
+            with open(BLE_KEEPALIVE_PID) as f:
+                pid = int(f.read().strip())
+            os.kill(pid, 0)
+            return True
+        except (FileNotFoundError, ValueError, OSError, ProcessLookupError):
+            return False
+
+    def _start_ble_keepalive(self):
+        if self._ble_keepalive_running():
+            return
+        proc = subprocess.Popen(
+            [sys.executable, BLE_KEEPALIVE_PY],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        try:
+            with open(BLE_KEEPALIVE_PID, "w") as f:
+                f.write(str(proc.pid))
+        except OSError:
+            pass
+        self._log("sys", f"[hook] BLE keepalive started (pid {proc.pid})")
+
+    def _stop_ble_keepalive(self):
+        try:
+            with open(BLE_KEEPALIVE_PID) as f:
+                pid = int(f.read().strip())
+            os.kill(pid, 15)  # SIGTERM
+            os.remove(BLE_KEEPALIVE_PID)
+            self._log("sys", f"[hook] BLE keepalive stopped (pid {pid})")
+        except (FileNotFoundError, ValueError, OSError, ProcessLookupError):
+            pass
+
     def _set_sim_controls(self, target: str):
         """Enable/disable controls based on active target."""
         for w in getattr(self, "_sim_widgets", []):
@@ -671,8 +716,13 @@ class App(tk.Tk):
 
         elif tgt == "hardware":
             self._conn_label.config(text="Hardware:")
-            self.sim_status.set("not paired")
-            self._sim_status_label.config(foreground="#888")
+            if not os.path.exists(BLE_ADDR_FILE):
+                self.sim_status.set("not paired")
+                self._sim_status_label.config(foreground="#888")
+            else:
+                alive = self._ble_keepalive_running()
+                self.sim_status.set("connected" if alive else "disconnected")
+                self._sim_status_label.config(foreground="green" if alive else "red")
 
         else:  # off
             self._conn_label.config(text="Connection:")
@@ -684,6 +734,8 @@ class App(tk.Tk):
         tgt = self._hook_target.get()
         if tgt == "desktop" and not self._keepalive_running():
             self._start_keepalive()
+        if tgt == "hardware" and os.path.exists(BLE_ADDR_FILE) and not self._ble_keepalive_running():
+            self._start_ble_keepalive()
         self._refresh_status()
         self.after(2000, self._poll_keepalive)
 
@@ -840,8 +892,16 @@ class App(tk.Tk):
         tgt = self._hook_target.get()
         if tgt == "sim":
             self._send(cmd)
-        elif tgt in ("desktop",):
-            # Route through keepalive cmds queue
+        elif tgt == "hardware" and not os.path.exists(BLE_ADDR_FILE):
+            # Nothing will ever drain this — buddy_ble_keepalive.py only
+            # reads the cmds queue once it has a paired device to connect
+            # to. Fail loudly instead of queuing silently.
+            self._log("sys", "[cmd] not paired — run Upload BLE first")
+        elif tgt in ("desktop", "hardware"):
+            # Route through the state-file cmds queue — the persistent
+            # keepalive (buddy_keepalive.py for desktop, buddy_ble_keepalive.py
+            # for hardware) drains it each tick. A one-off connection here
+            # would fight the keepalive for the device's single GATT slot.
             try:
                 with open(STATE_FILE) as f:
                     state = json.loads(f.read())
@@ -853,55 +913,11 @@ class App(tk.Tk):
             try:
                 with open(STATE_FILE, "w") as f:
                     f.write(json.dumps(state))
-                self._log("sys", f"[cmd] queued for desktop: {cmd}")
+                self._log("sys", f"[cmd] queued for {tgt}: {cmd}")
             except OSError as e:
                 self._log("sys", f"[cmd] error: {e}")
-        elif tgt == "hardware":
-            self._send_ble_cmd(cmd)
         else:
             self._log("sys", "[cmd] no target connected")
-
-    def _send_ble_cmd(self, cmd: dict):
-        """Send a single JSON command to hardware over BLE in a background thread."""
-        def _run():
-            try:
-                from bleak import BleakClient, BleakScanner
-                import asyncio
-
-                NUS_RX = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"
-                addr_file = os.path.expanduser("~/.buddy_ble_addr")
-
-                async def _go():
-                    address = None
-                    try:
-                        with open(addr_file) as f:
-                            address = f.read().strip()
-                    except FileNotFoundError:
-                        pass
-                    if not address:
-                        device = await BleakScanner.find_device_by_filter(
-                            lambda d, _: d.name and d.name.startswith("Claude-"),
-                            timeout=5.0)
-                        if not device:
-                            self._qlog("sys", "[BLE] no Claude-* device found")
-                            return
-                        address = device.address
-                        with open(addr_file, "w") as f:
-                            f.write(address)
-                    async with BleakClient(address, timeout=5.0) as client:
-                        mtu  = max(20, client.mtu_size - 3)
-                        line = (json.dumps(cmd, separators=(",", ":")) + "\n").encode()
-                        for i in range(0, len(line), mtu):
-                            await client.write_gatt_char(NUS_RX, line[i:i+mtu], response=False)
-                        self._qlog("sys", f"[BLE] sent: {cmd}")
-
-                asyncio.run(_go())
-            except ImportError:
-                self._qlog("sys", "[BLE] bleak not installed — pip install bleak")
-            except Exception as e:
-                self._qlog("sys", f"[BLE] error: {e}")
-
-        threading.Thread(target=_run, daemon=True).start()
 
     def _set_species_any(self):
         """Set species on whatever is currently connected."""
@@ -1099,6 +1115,11 @@ class App(tk.Tk):
         if not d:
             return
         script = os.path.join(TOOLS_DIR, "ble_driver.py")
+        # The BLE keepalive holds the device's one GATT connection slot —
+        # release it for the duration of the upload, then let _poll_keepalive
+        # restart it automatically once the address is (re-)cached.
+        self._stop_ble_keepalive()
+        self._log("sys", "[ble upload] pausing BLE keepalive for upload…")
         self._run_subprocess([sys.executable, "-u", script, d],
                              label="[ble upload]",
                              progress=self._char_action_progress)
