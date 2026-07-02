@@ -892,6 +892,11 @@ class App(tk.Tk):
         tgt = self._hook_target.get()
         if tgt == "sim":
             self._send(cmd)
+        elif tgt == "hardware" and not os.path.exists(BLE_ADDR_FILE):
+            # Nothing will ever drain this — buddy_ble_keepalive.py only
+            # reads the cmds queue once it has a paired device to connect
+            # to. Fail loudly instead of queuing silently.
+            self._log("sys", "[cmd] not paired — run Upload BLE first")
         elif tgt in ("desktop", "hardware"):
             # Route through the state-file cmds queue — the persistent
             # keepalive (buddy_keepalive.py for desktop, buddy_ble_keepalive.py
