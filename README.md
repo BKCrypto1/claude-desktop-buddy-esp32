@@ -357,7 +357,7 @@ The Buddy Manager has four target modes (toggle via `tools/buddy_target.sh` or t
 | --- | --- | --- | --- |
 | **Desktop** | keepalive | Hooks drive state; approval prompts block Claude | Actively using Claude Code |
 | **Sim** | bridge (sim_driver) | Manual controls only; keepalive stopped | Testing animations manually |
-| **Hardware** | BLE | BLE-only; both bridge and keepalive stopped | Real device connected |
+| **Hardware** | BLE | `buddy_ble_keepalive.py` owns the BLE connection; TCP bridge/keepalive stopped | Real device connected |
 | **Off** | — | Everything paused | |
 
 ### Desktop mode (Claude Code hooks)
@@ -394,6 +394,54 @@ The clock face appears automatically when Claude is idle and the RTC has been sy
 (time is sent from the desktop on connect). Between 22:00–7:00 the character plays
 its sleep animation on top of the clock. Any Claude activity (tool use, sessions
 running) hides the clock immediately.
+
+### Hardware mode (real device over BLE)
+
+In **Hardware** mode, `tools/buddy_ble_keepalive.py` holds a persistent BLE GATT
+connection to the paired device and streams the same wire protocol Desktop mode
+sends over TCP — live session state, approval prompts, tokens — so a real device
+reacts to Claude Code exactly like the simulator does. `sim_driver.py` starts and
+stops this bridge automatically as you switch target modes.
+
+The device only supports one BLE connection at a time, so all hardware-mode
+commands (owner/pet name, species, uploads) route through the same state-file
+queue the bridge already drains, rather than opening a second connection that
+would fight it for the slot.
+
+**Moving the device to a different computer** (e.g. bringing it to work):
+
+The device itself needs no changes — firmware, the active character, and NVS
+settings all live on the device and survive a switch of host computer. BLE
+bonding is per-host, so pairing with a new computer doesn't erase the bond with
+the old one.
+
+1. Clone this repo on the new machine and install `bleak`:
+   ```bash
+   git clone https://github.com/BKCrypto1/claude-desktop-buddy-esp32.git
+   cd claude-desktop-buddy-esp32
+   python3 -m venv .venv && .venv/bin/pip install bleak
+   ```
+2. Copy the `hooks` block from this machine's `~/.claude/settings.json` into the
+   new machine's, updating the path to `tools/buddy_hook.py` for the new clone.
+3. Set the target mode:
+   ```bash
+   tools/buddy_target.sh hardware
+   ```
+4. Pair from a real Terminal window — **not** through a Claude Code tool call.
+   The first connect needs a native macOS Bluetooth permission dialog, which
+   only appears for a directly-launched Terminal process:
+   ```bash
+   python3 tools/ble_driver.py characters/bufo
+   ```
+   Approve the permission dialog, then enter the 6-digit passkey shown on the
+   device screen. This also caches the device's BLE address to
+   `~/.buddy_ble_addr` for that machine.
+5. Launch Buddy Manager:
+   ```bash
+   python3 tools/sim_driver.py
+   ```
+   With the address cached, it auto-starts the BLE bridge and the hardware
+   status should show **connected** within a couple seconds.
 
 ### Simulator tab
 
