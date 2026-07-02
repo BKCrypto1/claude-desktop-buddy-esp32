@@ -4,6 +4,11 @@
 #include "ble_bridge.h"
 #include "hw/rtc.h"
 #include "xfer.h"
+#include "buddy.h"
+
+// Forward-declared here so _applyJson can trigger one-shot animations
+// when the bridge sends approved_add / denied_add signals.
+void triggerOneShot(PersonaState s, uint32_t durMs);
 
 struct TamaState {
   uint8_t  sessionsTotal;
@@ -118,10 +123,12 @@ static void _applyJson(const char* line, TamaState* out) {
   if (doc["approved_add"].is<uint32_t>()) {
     uint32_t n = doc["approved_add"].as<uint32_t>();
     for (uint32_t i = 0; i < n; i++) statsOnApproval(1);
+    if (n > 0) triggerOneShot(P_HEART, 2000);
   }
   if (doc["denied_add"].is<uint32_t>()) {
     uint32_t n = doc["denied_add"].as<uint32_t>();
     for (uint32_t i = 0; i < n; i++) statsOnDenial();
+    if (n > 0) triggerOneShot(P_DIZZY, 2000);
   }
   const char* m = doc["msg"];
   if (m) {
